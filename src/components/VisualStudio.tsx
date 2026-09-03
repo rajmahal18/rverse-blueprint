@@ -79,10 +79,16 @@ function Group({ number, title, badge, children }: { number:string; title:string
 export default function VisualStudio({ dna: rawDna, onChange, suggestionContext, recommendations, onOpenPattern, onAddPattern, sanity }: Props) {
   const dna = normalizeDna(rawDna)
   const [depth, setDepth] = useState<VisualDepth>(() => {
-    const saved = localStorage.getItem('blueprint-visual-depth')
-    return saved === 'Standard' || saved === 'Advanced' ? saved : 'Quick'
+    try {
+      const saved = localStorage.getItem('blueprint-visual-depth')
+      return saved === 'Standard' || saved === 'Advanced' ? saved : 'Quick'
+    } catch {
+      return 'Quick'
+    }
   })
-  useEffect(() => localStorage.setItem('blueprint-visual-depth', depth), [depth])
+  useEffect(() => {
+    try { localStorage.setItem('blueprint-visual-depth', depth) } catch { /* non-critical display preference */ }
+  }, [depth])
   const [previewDna, setPreviewDna] = useState<Dna | null>(null)
   const [previewLabel, setPreviewLabel] = useState('')
   const displayDna = previewDna ?? dna

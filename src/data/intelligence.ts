@@ -1,12 +1,12 @@
 import {
   appTypes,
   configSettings,
-  configWarnings,
   effectiveConfigValue,
   isRedundantSetting,
   isScopeSetting,
   recommendedValue,
   resolveScope,
+  resolvedOperationalScale,
   scopeChoice,
   settingIsActive,
   type AppType,
@@ -15,6 +15,7 @@ import {
   type ProjectConfig,
 } from './configurator'
 import { projectContextEntries, type ProjectContext } from './projectContext'
+import { configReviewSignals, reviewSignalCounts, type ReviewCategory, type ReviewSeverity } from './reviewSignals'
 
 
 export type ConfigAction = {
@@ -42,57 +43,126 @@ export type ReadinessDimension = {
 
 export type ReadinessReport = {
   score: number
-  label: 'Ready' | 'Ready with review' | 'Needs review'
+  label: 'Ready' | 'Ready with review' | 'Needs review' | 'Not ready'
   coverage: number
   warnings: number
+  signals: number
+  blockers: number
+  important: number
+  review: number
+  advisory: number
   dimensions: ReadinessDimension[]
+}
+
+export type RecommendationSource = 'Explicit' | 'Required' | 'Inferred' | 'App type' | 'Profile' | 'Operational scale' | 'Baseline' | 'Inactive'
+
+export type RecommendationProvenance = {
+  source: RecommendationSource
+  reason: string
+  expected: ConfigValue
+  current: ConfigValue
 }
 
 const value = (config: ProjectConfig, id: string) => effectiveConfigValue(config, id)
 const active = (config: ProjectConfig, id: string) => settingIsActive(id, config)
 
-const containsAny = (source: string, words: string[]) => words.some((word) => source.includes(word))
+const severityPenalty: Record<ReviewSeverity, number> = {
+  advisory: 2,
+  review: 7,
+  important: 15,
+  blocker: 32,
+}
+
+const dimensionCategories: Record<string, ReviewCategory[]> = {
+  Coherence: ['scope', 'architecture'],
+  Safety: ['security', 'privacy'],
+  Resilience: ['reliability', 'data', 'operations'],
+  Usability: ['usability', 'accessibility', 'testing'],
+}
 
 export function configReadiness(config: ProjectConfig): ReadinessReport {
-  const warnings = configWarnings(config)
+  const signals = configReviewSignals(config)
+  const counts = reviewSignalCounts(signals)
   const activeSettings = configSettings.filter((setting) => settingIsActive(setting, config))
   const valued = activeSettings.filter((setting) => config.values[setting.id] !== undefined && config.values[setting.id] !== null).length
   const coverage = activeSettings.length ? Math.round((valued / activeSettings.length) * 100) : 100
 
-  const buckets = {
-    consistency: 0,
-    safety: 0,
-    resilience: 0,
-    usability: 0,
-  }
-
-  for (const warning of warnings) {
-    const text = warning.toLowerCase()
-    if (containsAny(text, ['password', 'auth', 'permission', 'tenant', 'security', 'csrf', 'cors', 'csp', 'sensitive', 'clinical', 'privacy', 'secret', 'delete'])) buckets.safety += 1
-    if (containsAny(text, ['backup', 'restore', 'retry', 'webhook', 'health', 'uptime', 'migration', 'offline', 'availability', 'incident', 'deployment'])) buckets.resilience += 1
-    if (containsAny(text, ['accessibility', 'label', 'color', 'drag', 'chart', 'motion', 'mobile', 'password manager', 'paste', 'user'])) buckets.usability += 1
-    if (!containsAny(text, ['password', 'auth', 'permission', 'tenant', 'security', 'csrf', 'cors', 'csp', 'sensitive', 'clinical', 'privacy', 'secret', 'delete', 'backup', 'restore', 'retry', 'webhook', 'health', 'uptime', 'migration', 'offline', 'availability', 'incident', 'deployment', 'accessibility', 'label', 'color', 'drag', 'chart', 'motion', 'mobile', 'password manager', 'paste'])) buckets.consistency += 1
-  }
-
-  const dimension = (label: string, count: number, note: string): ReadinessDimension => ({
-    label,
-    score: Math.max(35, 100 - count * 18),
-    note: count ? `${count} review signal${count > 1 ? 's' : ''}` : note,
+  const dimensions = Object.entries(dimensionCategories).map(([label, categories]): ReadinessDimension => {
+    const relevant = signals.filter((signal) => categories.includes(signal.category))
+    const penalty = relevant.reduce((sum, signal) => sum + severityPenalty[signal.severity], 0)
+    return {
+      label,
+      score: Math.max(20, 100 - penalty),
+      note: relevant.length ? `${relevant.length} typed signal${relevant.length > 1 ? 's' : ''}` : label === 'Coherence'
+        ? 'No scope or architecture conflict'
+        : label === 'Safety'
+          ? 'Security and privacy posture are internally aligned'
+          : label === 'Resilience'
+            ? 'Failure, data, and operating posture are aligned'
+            : 'No obvious usability, accessibility, or test-coverage tension',
+    }
   })
-  const dimensions = [
-    dimension('Coherence', buckets.consistency, 'No obvious product-policy conflict'),
-    dimension('Safety', buckets.safety, 'Security and data posture are internally aligned'),
-    dimension('Resilience', buckets.resilience, 'Failure/recovery expectations are aligned'),
-    dimension('Usability', buckets.usability, 'No obvious usability/accessibility tension'),
-  ]
-  const score = Math.max(35, Math.round((coverage * 0.25) + (dimensions.reduce((sum, item) => sum + item.score, 0) / dimensions.length) * 0.75))
+
+  const riskPenalty = signals.reduce((sum, signal) => sum + severityPenalty[signal.severity], 0)
+  const score = Math.max(20, Math.min(100, Math.round((coverage * 0.2) + ((100 - Math.min(80, riskPenalty)) * 0.8))))
+  const label: ReadinessReport['label'] = counts.blocker > 0
+    ? 'Not ready'
+    : counts.important >= 3
+      ? 'Needs review'
+      : signals.length > 0
+        ? 'Ready with review'
+        : 'Ready'
+
   return {
     score,
     coverage,
-    warnings: warnings.length,
-    label: warnings.length === 0 ? 'Ready' : warnings.length <= 3 ? 'Ready with review' : 'Needs review',
+    warnings: signals.length,
+    signals: signals.length,
+    blockers: counts.blocker,
+    important: counts.important,
+    review: counts.review,
+    advisory: counts.advisory,
+    label,
     dimensions,
   }
+}
+
+export function settingRecommendationProvenance(setting: ConfigSetting, config: ProjectConfig): RecommendationProvenance {
+  const expected = recommendedValue(setting, config.appType, config.profile, config.operationalScale)
+  const current = effectiveConfigValue(config, setting.id)
+
+  if (isScopeSetting(setting.id)) {
+    const resolution = resolveScope(config, setting.id)
+    const source: RecommendationSource = resolution.source === 'Contextual'
+      ? 'App type'
+      : resolution.source
+    return { source, reason: resolution.reason, expected: resolution.effectiveValue, current }
+  }
+
+  if (!settingIsActive(setting, config)) {
+    return { source: 'Inactive', reason: 'This decision is dormant because its parent scope or dependency is inactive.', expected, current }
+  }
+
+  if (config.overrides.includes(setting.id)) {
+    return { source: 'Explicit', reason: `Customized from the current recommendation (${String(expected)}).`, expected, current }
+  }
+
+  if (config.profile !== 'Recommended' && setting.profileDefaults?.[config.profile as Exclude<typeof config.profile, 'Recommended'>] !== undefined) {
+    return { source: 'Profile', reason: `${config.profile} recommendation posture supplies this default inside active scope.`, expected, current }
+  }
+
+  const resolvedScale = resolvedOperationalScale(config)
+  const scaleVariants = (['Lean', 'Standard', 'High scale', 'Mission critical'] as const)
+    .map((scale) => recommendedValue(setting, config.appType, config.profile, scale))
+  if (new Set(scaleVariants.map((item) => JSON.stringify(item))).size > 1) {
+    return { source: 'Operational scale', reason: `${resolvedScale} operational scale supplies this proportional implementation default${config.operationalScale === 'Auto' ? ' through Auto inference' : ''} without changing product scope.`, expected, current }
+  }
+
+  if (setting.appDefaults?.[config.appType] !== undefined) {
+    return { source: 'App type', reason: `Recommended for ${config.appType} inside the resolved active scope.`, expected, current }
+  }
+
+  return { source: 'Baseline', reason: 'Blueprint baseline recommendation for this active decision.', expected, current }
 }
 
 const signalIds = new Set([
@@ -154,6 +224,10 @@ export function configQuickFixes(config: ProjectConfig): ConfigAction[] {
   if (value(config, 'admin.enabled') === true && value(config, 'login.enabled') === false) add({ id: 'protect-admin', title: 'Protect the admin surface', detail: 'Enable login so administrative routes have an authentication boundary.', changes: [{ id: 'login.enabled', value: true }] })
   if (active(config, 'permissions.defaultPolicy') && value(config, 'permissions.defaultPolicy') === 'Allow by default') add({ id: 'deny-default', title: 'Use deny-by-default authorization', detail: 'New routes/actions should not become accessible unless permission is explicitly granted.', changes: [{ id: 'permissions.defaultPolicy', value: 'Deny by default' }] })
   if (active(config, 'permissions.enforcement') && value(config, 'permissions.enforcement') === 'UI checks only') add({ id: 'server-authz', title: 'Enforce permissions on the server', detail: 'Keep UI hiding as convenience, but make the server/action boundary authoritative.', changes: [{ id: 'permissions.enforcement', value: 'Server enforced + UI reflects access' }] })
+  if (['Shared multi-tenant runtime', 'Hybrid shared + isolated'].includes(String(value(config, 'product.deploymentModel'))) && value(config, 'product.reuseIntent') !== 'Single-purpose application' && value(config, 'org.mode') !== 'Multi-tenant organizations') add({ id: 'product-multi-tenant-boundary', title: 'Make organizations first-class tenants', detail: 'Use the multi-tenant organization model before sharing one runtime across independent organizations.', changes: [{ id: 'org.mode', value: 'Multi-tenant organizations' }, { id: 'org.tenantIsolation', value: 'Strict tenant scope' }] })
+  if (active(config, 'product.isolationStrategy') && value(config, 'product.isolationStrategy') === 'Application query filters only') add({ id: 'product-data-boundary', title: 'Enforce tenant isolation at the data boundary', detail: 'Use database-enforced tenant context/RLS so one missed query filter cannot cross organization boundaries.', changes: [{ id: 'product.isolationStrategy', value: 'Database-enforced tenant context / RLS' }] })
+  if (active(config, 'product.sharedCore') && value(config, 'product.sharedCore') === 'Per-tenant code forks allowed') add({ id: 'product-shared-core', title: 'Keep one upgradeable product core', detail: 'Represent tenant differences as configuration or controlled adapters rather than permanent repository forks.', changes: [{ id: 'product.sharedCore', value: 'One shared core — no tenant forks' }] })
+  if (active(config, 'product.versioning') && value(config, 'product.versioning') === 'Tenant-version branches allowed') add({ id: 'product-shared-version', title: 'Keep tenants on one product line', detail: 'Use one compatible version or backward-compatible staged migrations instead of tenant-specific version branches.', changes: [{ id: 'product.versioning', value: 'Backward-compatible staged migrations' }] })
   if (active(config, 'booking.conflictPolicy') && value(config, 'booking.conflictPolicy') === 'UI check only') add({ id: 'booking-atomic', title: 'Make booking conflicts atomic', detail: 'Reject concurrent conflicts at the authoritative write boundary.', changes: [{ id: 'booking.conflictPolicy', value: 'Atomic conflict rejection' }] })
   if (active(config, 'payments.verification') && value(config, 'payments.verification') === 'Client return / redirect only') add({ id: 'payment-authority', title: 'Verify payments server-side', detail: 'Use provider/server verification before marking a payment complete or fulfilling it.', changes: [{ id: 'payments.verification', value: 'Server/webhook verified' }] })
   if (active(config, 'webhook.signing') && value(config, 'webhook.signing') === 'Unsigned') add({ id: 'sign-webhooks', title: 'Sign outgoing webhooks', detail: 'Add an HMAC signature and timestamp so consumers can verify authenticity.', changes: [{ id: 'webhook.signing', value: 'HMAC signature + timestamp' }] })
@@ -199,6 +273,11 @@ export function acceptanceCriteria(config: ProjectConfig): string[] {
   if (scopeOn('pack.government')) pushUnique(items, 'Document routing/receipt/status changes preserve actor/time history and public tracking never exposes internal or restricted routing detail.')
   if (scopeOn('integration.externalAutomation')) pushUnique(items, 'External automations are retry-safe, observable, permission-scoped, and can fail without corrupting the core business state.')
   if (scopeOn('ai.enabled')) pushUnique(items, 'AI output never bypasses caller permissions; structured/grounded tasks validate output and high-impact actions require the configured human-control boundary.')
+  if (value(config, 'product.reuseIntent') !== 'Single-purpose application') {
+    pushUnique(items, 'A new organization can be onboarded by configuration/provisioning without cloning the repository or editing tenant-specific business logic into the shared core.')
+    if (['Configurable modules per organization', 'Entitlement-based modules / editions'].includes(String(value(config, 'product.moduleModel')))) pushUnique(items, 'Disabling a tenant module removes its navigation/actions/jobs without corrupting shared data or activating hidden module dependencies.')
+    if (['Shared multi-tenant runtime', 'Hybrid shared + isolated'].includes(String(value(config, 'product.deploymentModel')))) pushUnique(items, 'Every tenant-owned read/write/export/job is constrained by an authoritative tenant context, including privileged and background execution paths.')
+  }
   if (String(value(config, 'quality.accessibility')).includes('WCAG')) pushUnique(items, 'Representative workflows are keyboard-operable, have visible focus and programmatic labels, do not rely on color alone, and remain usable at mobile/high zoom.')
   if (scopeOn('landing.enabled') || scopeOn('dashboard.enabled') || scopeOn('records.crud') || anyIntegration) pushUnique(items, 'Loading, empty, permission, network, and server-error states give users a clear next action and never silently discard completed work.')
   return items.slice(0, 14)
@@ -225,6 +304,11 @@ export function edgeCases(config: ProjectConfig): string[] {
   else if (scopeOn('workflow.enabled')) pushUnique(items, 'Two users attempt conflicting status transitions or edit the same workflow record at nearly the same time.')
   if (scopeOn('attachments.enabled')) pushUnique(items, 'Upload is too large, wrong type, interrupted, duplicated, or references a record the user can no longer access.')
   if (value(config, 'platform.offline') === 'Offline write + sync') pushUnique(items, 'Offline edits conflict with newer server state when connectivity returns.')
+  if (value(config, 'product.reuseIntent') !== 'Single-purpose application') {
+    pushUnique(items, 'One organization changes modules, terminology, workflow policy, or branding while another organization is actively using the same product; tenant configuration must not leak across boundaries.')
+    if (['Shared multi-tenant runtime', 'Hybrid shared + isolated'].includes(String(value(config, 'product.deploymentModel')))) pushUnique(items, 'A background job, report/export, cache key, or platform-support action runs with the wrong/missing tenant context and must fail closed rather than expose another organization.')
+    if (value(config, 'product.rollout') !== 'All organizations together') pushUnique(items, 'A staged feature or migration is enabled for one tenant while another remains on the previous compatible behavior; both must continue to operate safely.')
+  }
   if (scopeOn('ai.enabled')) pushUnique(items, 'AI provider times out, returns malformed/unsupported output, lacks enough evidence, or receives prompt-injection content from a document/tool result.')
   if (scopeOn('pack.clinic')) pushUnique(items, 'Patient identity is duplicated/merged incorrectly or a staff member loses clinical access during an active encounter.')
   if (scopeOn('pack.government')) pushUnique(items, 'Document is routed twice, returned to a prior office, superseded by a child/related document, or tracked publicly after its visibility changes.')
@@ -239,6 +323,9 @@ export type ProjectContextReviewSignal = {
   title: string
   detail: string
   targetSection: string
+  severity: 'advisory'
+  category: 'scope'
+  affectedSettings: string[]
 }
 
 /**
@@ -262,6 +349,9 @@ export function projectContextReviewSignals(context: ProjectContext, config: Pro
       title: 'Possible commerce scope mismatch',
       detail: 'Project Context describes customers shopping, ordering, or checking out online, but E-commerce is not active. Review the commerce pack if purchasing is truly in scope; otherwise keep the current structured scope.',
       targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.commerce'],
     })
   }
 
@@ -275,6 +365,9 @@ export function projectContextReviewSignals(context: ProjectContext, config: Pro
       title: 'Possible booking scope mismatch',
       detail: 'Project Context describes reservations, appointments, or bookable time slots, but Booking & scheduling is not active. Review that pack if users must reserve real availability.',
       targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.booking'],
     })
   }
 
@@ -288,6 +381,26 @@ export function projectContextReviewSignals(context: ProjectContext, config: Pro
       title: 'Possible payment scope mismatch',
       detail: 'Project Context explicitly mentions collecting or processing payments, but Payments & money is not active. Review the payments pack if money movement belongs in the product.',
       targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.payments'],
+    })
+  }
+
+  const reusableProductIntent = has(
+    /\bmultiple ministr(?:y|ies)\b/, /\bmultiple organizations?\b/, /\bmultiple agencies\b/, /\bwhite[- ]?label\b/,
+    /\bplug[- ]?and[- ]?play\b/, /\breuse (?:the )?(?:same )?(?:app|system|platform|codebase)\b/,
+    /\bone (?:app|system|platform|codebase) (?:for|across) (?:many|multiple|different)\b/, /\btenant[- ]configurable\b/
+  )
+  if (reusableProductIntent && value(config, 'product.reuseIntent') === 'Single-purpose application') {
+    signals.push({
+      id: 'context-reusable-product-mismatch',
+      title: 'Possible reusable-product architecture mismatch',
+      detail: 'Project Context describes one product serving multiple ministries/organizations or a white-label/reusable deployment model, but Product reuse intent is still Single-purpose application. Review Reusable product architecture; do not change business packs automatically.',
+      targetSection: 'productization',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['product.reuseIntent'],
     })
   }
 

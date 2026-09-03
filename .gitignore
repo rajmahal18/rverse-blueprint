@@ -6,3 +6,11 @@ dist/
 .DS_Store
 *.log
 .wrangler/
+*.tsbuildinfo
+.blueprint-test-build/
+.blueprint-persistence-test-build/
+.blueprint-review-test-build/
+.blueprint-core-flow-test-build/
+.blueprint-roadmap-test-build/
+
+.blueprint-productization-test-build/

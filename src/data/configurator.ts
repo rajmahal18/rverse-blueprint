@@ -115,6 +115,7 @@ export const configSections: ConfigSection[] = [
   { id: 'accounts', label: 'Accounts & profiles', description: 'Profile shape, account states, identity changes, invitations, and account lifecycle.' },
   { id: 'permissions', label: 'Roles & permissions', description: 'Authorization model, role structure, permission scope, ownership rules, and privileged access.' },
   { id: 'organizations', label: 'Organizations & teams', description: 'Workspaces, departments, memberships, invitations, tenant boundaries, and organization administration.' },
+  { id: 'productization', label: 'Reusable product architecture', description: 'Build-once reuse intent, tenant deployment, modularity, configuration, extension points, rollout, and anti-fork architecture.' },
   { id: 'pages', label: 'Page inventory', description: 'Common public and account pages that should exist without forcing a custom sitemap from scratch.' },
   { id: 'public', label: 'Landing & public site', description: 'Landing-page composition, public proof, calls-to-action, and marketing/supporting sections.' },
   { id: 'navigation', label: 'Navigation & orientation', description: 'How users move, recover context, search globally, and reach frequent actions.' },
@@ -1436,6 +1437,86 @@ export const configSettings: ConfigSetting[] = [
     appDefaults: { 'SaaS / Client Portal': 'Restricted platform admins only' }, profileDefaults: { Advanced: 'Support role with explicit tenant entry' }, advanced: true,
   },
 
+
+  // Reusable product architecture
+  {
+    id: 'product.reuseIntent', section: 'productization', group: 'Product reuse', label: 'Product reuse intent', description: 'Whether this codebase is meant for one organization only or should become a reusable product that can onboard similar organizations without cloning the application.', kind: 'choice', defaultValue: 'Single-purpose application',
+    options: [{ value: 'Single-purpose application' }, { value: 'Reusable for similar organizations' }, { value: 'Multi-organization platform' }, { value: 'White-label product' }],
+    profileDefaults: { Minimal: 'Single-purpose application' },
+    keywords: ['reusable', 'plug and play', 'tenant', 'ministry', 'organization', 'white label', 'multi-tenant', 'product platform'],
+  },
+  {
+    id: 'product.deploymentModel', section: 'productization', group: 'Tenant runtime', label: 'Organization deployment model', description: 'Choose whether organizations share one runtime or receive isolated deployments while still consuming the same maintained product core.', kind: 'choice', defaultValue: 'Shared multi-tenant runtime',
+    options: [{ value: 'Shared multi-tenant runtime' }, { value: 'Isolated deployment per organization' }, { value: 'Hybrid shared + isolated' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+    advanced: true,
+  },
+  {
+    id: 'product.sharedCore', section: 'productization', group: 'Product reuse', label: 'Shared-core policy', description: 'Define how strongly tenant-specific needs must stay out of permanent source forks so every organization can keep receiving the same product upgrades.', kind: 'choice', defaultValue: 'One shared core — no tenant forks',
+    options: [{ value: 'One shared core — no tenant forks' }, { value: 'Shared core + approved tenant adapters' }, { value: 'Per-tenant code forks allowed' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+    caution: 'Per-tenant forks create upgrade drift and make plug-and-play onboarding progressively harder.',
+  },
+  {
+    id: 'product.moduleModel', section: 'productization', group: 'Modules & entitlements', label: 'Module model', description: 'Control whether every organization receives the same modules or each organization can enable only the capabilities it actually needs.', kind: 'choice', defaultValue: 'Configurable modules per organization',
+    options: [{ value: 'Fixed modules for everyone' }, { value: 'Configurable modules per organization' }, { value: 'Entitlement-based modules / editions' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+  },
+  {
+    id: 'product.moduleDependencies', section: 'productization', group: 'Modules & entitlements', label: 'Module dependency rules', description: 'Keep optional modules composable by declaring required dependencies instead of hiding cross-module assumptions inside implementation code.', kind: 'choice', defaultValue: 'Explicit dependency graph',
+    options: [{ value: 'Independent modules only' }, { value: 'Explicit dependency graph' }, { value: 'Bundled editions with documented dependencies' }], dependsOn: { id: 'product.moduleModel', equals: ['Configurable modules per organization', 'Entitlement-based modules / editions'] }, advanced: true,
+  },
+  {
+    id: 'product.configScope', section: 'productization', group: 'Tenant configuration', label: 'Configuration scope', description: 'Decide how organization-specific behavior is resolved without copying global application code or mutating other tenants.', kind: 'choice', defaultValue: 'Global defaults + organization overrides',
+    options: [{ value: 'Global configuration only' }, { value: 'Global defaults + organization overrides' }, { value: 'Organization-managed configuration' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+  },
+  {
+    id: 'product.provisioning', section: 'productization', group: 'Tenant lifecycle', label: 'Organization provisioning', description: 'Define how a new organization becomes usable without hand-editing source code, environment files, or database rows.', kind: 'choice', defaultValue: 'Platform-admin provisioning',
+    options: [{ value: 'Developer/manual setup' }, { value: 'Platform-admin provisioning' }, { value: 'Automated/self-service provisioning' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+  },
+  {
+    id: 'product.lifecycle', section: 'productization', group: 'Tenant lifecycle', label: 'Organization lifecycle controls', description: 'Treat organization activation, suspension, archival, and offboarding as product state rather than ad-hoc database edits.', kind: 'choice', defaultValue: 'Provision + suspend/archive',
+    options: [{ value: 'Manual create/delete only' }, { value: 'Provision + suspend/archive' }, { value: 'Automated provisioning + offboarding' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] }, advanced: true,
+  },
+  {
+    id: 'product.terminology', section: 'productization', group: 'Tenant configuration', label: 'Tenant-specific terminology', description: 'Allow organization vocabulary such as ministry, office, branch, employee, or member to vary without branching business logic.', kind: 'choice', defaultValue: 'Configurable labels / vocabulary',
+    options: [{ value: 'Fixed product vocabulary' }, { value: 'Configurable labels / vocabulary' }, { value: 'Locale + tenant vocabulary packs' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] }, advanced: true,
+  },
+  {
+    id: 'product.customFields', section: 'productization', group: 'Tenant configuration', label: 'Tenant custom fields', description: 'Choose whether organizations can extend selected records through governed metadata rather than tenant-specific schema forks.', kind: 'choice', defaultValue: 'Selected entities only',
+    options: [{ value: 'Fixed schema only' }, { value: 'Selected entities only' }, { value: 'Broad metadata-driven fields' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] }, advanced: true,
+  },
+  {
+    id: 'product.workflowCustomization', section: 'productization', group: 'Tenant configuration', label: 'Tenant workflow customization', description: 'Define how much approval/status behavior organizations may change without injecting arbitrary tenant code into the shared product core.', kind: 'choice', defaultValue: 'Policy-driven tenant overrides',
+    options: [{ value: 'Fixed workflows' }, { value: 'Policy-driven tenant overrides' }, { value: 'Tenant workflow builder' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] }, advanced: true,
+  },
+  {
+    id: 'product.roleCustomization', section: 'productization', group: 'Tenant configuration', label: 'Tenant role customization', description: 'Keep authorization adaptable while preserving platform-level invariants and deny-by-default enforcement.', kind: 'choice', defaultValue: 'Role templates + organization overrides',
+    options: [{ value: 'Global fixed roles' }, { value: 'Role templates + organization overrides' }, { value: 'Organization-defined roles' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] }, advanced: true,
+  },
+  {
+    id: 'product.brandingDepth', section: 'productization', group: 'White-label surface', label: 'Organization branding depth', description: 'Control how much organization identity can change while preserving one maintained design system and interaction model.', kind: 'choice', defaultValue: 'Tenant identity overlay',
+    options: [{ value: 'Product brand only' }, { value: 'Tenant identity overlay' }, { value: 'Full white-label shell' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+  },
+  {
+    id: 'product.isolationStrategy', section: 'productization', group: 'Tenant runtime', label: 'Tenant data-isolation strategy', description: 'Choose the enforceable data boundary for organizations sharing infrastructure; UI filtering or remembering tenantId in controllers is not sufficient by itself.', kind: 'choice', defaultValue: 'Database-enforced tenant context / RLS',
+    options: [{ value: 'Application query filters only' }, { value: 'Database-enforced tenant context / RLS' }, { value: 'Separate schema per organization' }, { value: 'Separate database per organization' }, { value: 'Hybrid by tenant tier' }], dependsOn: { id: 'product.deploymentModel', equals: ['Shared multi-tenant runtime', 'Hybrid shared + isolated'] },
+    caution: 'Shared-tenant data access must fail closed even when an application query forgets a tenant filter.',
+  },
+  {
+    id: 'product.extensionStrategy', section: 'productization', group: 'Extension architecture', label: 'Tenant extension strategy', description: 'Prefer configuration and typed extension points before runtime plugin loading so tenant customization remains testable and upgradeable.', kind: 'choice', defaultValue: 'Configuration first',
+    options: [{ value: 'Configuration first' }, { value: 'Configuration + typed extension points' }, { value: 'Runtime plugin loading' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+    profileDefaults: { Advanced: 'Configuration + typed extension points' }, advanced: true,
+    caution: 'Runtime plugin loading adds versioning, trust, sandboxing, and compatibility responsibilities that many internal products do not need.',
+  },
+  {
+    id: 'product.rollout', section: 'productization', group: 'Release compatibility', label: 'Tenant feature rollout', description: 'Ship one product while controlling when a module or risky change becomes available to particular organizations.', kind: 'choice', defaultValue: 'Tenant feature flags',
+    options: [{ value: 'All organizations together' }, { value: 'Tenant feature flags' }, { value: 'Cohort / staged tenant rollout' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+    advanced: true,
+  },
+  {
+    id: 'product.versioning', section: 'productization', group: 'Release compatibility', label: 'Shared product versioning', description: 'Keep organizations on one upgradeable product line instead of accumulating tenant-specific application versions that cannot be maintained together.', kind: 'choice', defaultValue: 'One shared product/schema version',
+    options: [{ value: 'One shared product/schema version' }, { value: 'Backward-compatible staged migrations' }, { value: 'Tenant-version branches allowed' }], dependsOn: { id: 'product.reuseIntent', equals: ['Reusable for similar organizations', 'Multi-organization platform', 'White-label product'] },
+    profileDefaults: { Advanced: 'Backward-compatible staged migrations' }, caution: 'Long-lived tenant-version branches recreate the same maintenance problem as code forks.',
+  },
+
   // Page inventory
   {
     id: 'pages.about', section: 'pages', group: 'Public pages', label: 'About page', description: 'Dedicated page for organization, product, team, or creator context when it helps trust or orientation.', kind: 'boolean', defaultValue: false,
@@ -2726,6 +2807,7 @@ export function isScopeSetting(id: string): boolean {
 const quickSettingIds = new Set([
   'app.accessShape', 'app.audience', 'app.primarySurface',
   'login.enabled', 'registration.mode', 'access.guest', 'profile.enabled', 'roles.level', 'org.mode',
+  'product.reuseIntent', 'product.deploymentModel', 'product.moduleModel',
   'pages.about', 'pages.features', 'pages.pricing', 'pages.contact', 'pages.faq',
   'landing.enabled', 'landing.complexity', 'landing.heroImage', 'landing.primaryCta',
   'nav.primary', 'nav.mobile', 'dashboard.enabled',
@@ -3235,6 +3317,17 @@ export function configWarnings(config: ProjectConfig): string[] {
   if (active('permissions.defaultPolicy') && value('permissions.defaultPolicy') === 'Allow by default') warnings.push('Authorization is configured to allow by default. Prefer deny-by-default so new routes/actions do not become exposed accidentally.')
   if (active('permissions.enforcement') && value('permissions.enforcement') === 'UI checks only') warnings.push('Permissions are configured as UI-only checks. Protected actions must be enforced on the server/action boundary too.')
   if (active('org.tenantIsolation') && value('org.mode') === 'Multi-tenant organizations' && value('org.tenantIsolation') === 'Shared scope / labels only') warnings.push('Multi-tenant mode is using shared/cosmetic tenant scope. Enforce a real tenant data boundary in authorization and data access.')
+  const reuseIntent = String(value('product.reuseIntent'))
+  const reusableProduct = reuseIntent !== 'Single-purpose application'
+  const sharedTenantRuntime = reusableProduct && ['Shared multi-tenant runtime', 'Hybrid shared + isolated'].includes(String(value('product.deploymentModel')))
+  if (sharedTenantRuntime && value('org.mode') !== 'Multi-tenant organizations') warnings.push('Shared multi-tenant deployment is selected, but Organization / team model is not Multi-tenant organizations. Make tenant ownership a first-class account/data boundary before sharing one runtime across organizations.')
+  if (sharedTenantRuntime && active('product.isolationStrategy') && value('product.isolationStrategy') === 'Application query filters only') warnings.push('Reusable shared-tenant architecture relies on application query filters only. Enforce tenant isolation at a trusted data boundary such as database policies/RLS or stronger isolation.')
+  if (reusableProduct && active('product.sharedCore') && value('product.sharedCore') === 'Per-tenant code forks allowed') warnings.push('Reusable product architecture allows per-tenant code forks. Long-lived forks will drift, multiply testing effort, and defeat build-once upgrades; keep one shared core with configuration or controlled adapters.')
+  if (reusableProduct && active('product.versioning') && value('product.versioning') === 'Tenant-version branches allowed') warnings.push('Reusable product architecture allows tenant-version branches. Keep organizations on one compatible product line or use backward-compatible staged migrations instead of permanent tenant versions.')
+  if (reusableProduct && active('product.extensionStrategy') && value('product.extensionStrategy') === 'Runtime plugin loading') warnings.push('Runtime tenant plugin loading is selected. Confirm that plugin trust, sandboxing, compatibility/version contracts, failure isolation, and upgrade testing are genuinely required before taking on this complexity.')
+  if (['Multi-organization platform', 'White-label product'].includes(reuseIntent) && active('product.provisioning') && value('product.provisioning') === 'Developer/manual setup') warnings.push('A multi-organization product still requires developer/manual setup for each organization. Move tenant onboarding into a repeatable platform-admin or automated provisioning flow.')
+  if (reusableProduct && active('product.moduleModel') && value('product.moduleModel') === 'Fixed modules for everyone') warnings.push('Reusable product architecture uses one fixed module set for every organization. Confirm that all target organizations truly share the same product surface; otherwise use configurable modules or entitlements instead of code forks.')
+  if (reuseIntent === 'White-label product' && active('product.brandingDepth') && value('product.brandingDepth') === 'Product brand only') warnings.push('White-label product intent is selected while branding remains product-only. Either allow tenant identity/white-label branding or change the reuse intent.')
   if (active('password.temporary') && value('password.temporary') === 'Temporary without forced change') warnings.push('Admin-issued temporary passwords are allowed without a first-login replacement requirement.')
   if (['Government System', 'Clinic / EMR'].includes(config.appType) && value('quality.audit') === 'Off') warnings.push(`${config.appType} normally needs an audit trail for important user and administrative actions.`)
   if (['Government System', 'Clinic / EMR'].includes(config.appType) && ['Basic', 'WCAG A'].includes(String(value('quality.accessibility')))) warnings.push(`${config.appType} is configured below the recommended WCAG AA accessibility target.`)

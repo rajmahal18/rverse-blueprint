@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertTriangle,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
   ArrowUpRight,
   BookmarkPlus,
   Check,
@@ -10,6 +13,7 @@ import {
   ClipboardList,
   Compass,
   Copy,
+  Database,
   Download,
   ExternalLink,
   Eye,
@@ -23,6 +27,8 @@ import {
   Layers3,
   Lightbulb,
   Link as LinkIcon,
+  ListChecks,
+  LoaderCircle,
   Menu,
   Palette,
   Plus,
@@ -44,6 +50,8 @@ import { capabilities, capabilityCategories, type Capability, type CapabilityCat
 import { defaultDocIds, projectDocs, type ProjectDoc } from './data/docs'
 import { activeCapabilities, activePatterns, capabilityApplicability, crossLayerSignals, patternApplicability } from './data/consistency'
 import { emptyProjectContext, normalizeProjectContext, projectContextEntries, projectContextPrompt, projectContextQuestions, type ProjectContext } from './data/projectContext'
+import { coreFlowAcceptanceCriteria, coreFlowFailureCases, coreFlowFromTemplate, coreFlowsMarkdown, coreFlowsPrompt, coreFlowQuality, createCoreFlow, normalizeCoreFlows, suggestedCoreFlowTemplates, type CoreFlow } from './data/coreFlows'
+import { deriveImplementationRoadmap, implementationRoadmapMarkdown, implementationRoadmapPrompt } from './data/roadmap'
 import {
   appTypes,
   changeConfigContext,
@@ -52,7 +60,6 @@ import {
   operationalScales,
   configSections,
   configSettings,
-  configWarnings,
   createProjectConfig,
   effectiveConfigValue,
   formatConfigValue,
@@ -87,10 +94,22 @@ import {
   edgeCases,
   projectContextReviewSignals,
   settingGuidance,
+  settingRecommendationProvenance,
   type ConfigAction,
 } from './data/intelligence'
+import { configReviewSignals, type ReviewSignal } from './data/reviewSignals'
+import {
+  cleanupOrphanAssets,
+  collectReferencedAssetIds,
+  getAssetBlob,
+  loadWorkspace,
+  putAsset,
+  requestPersistentStorage,
+  saveWorkspace,
+  stripInlineImageData,
+} from './data/persistence'
 
-type View = 'home' | 'setup' | 'patterns' | 'compare' | 'capabilities' | 'docs' | 'dna' | 'references' | 'inspiration' | 'spec'
+type View = 'home' | 'setup' | 'flows' | 'roadmap' | 'patterns' | 'compare' | 'capabilities' | 'docs' | 'dna' | 'references' | 'inspiration' | 'spec'
 
 type ReferenceFocus = 'Navigation' | 'Layout' | 'Typography' | 'Color' | 'Motion' | 'Components' | 'Composition' | 'Other'
 
@@ -100,7 +119,8 @@ type ReferenceItem = {
   url: string
   note: string
   focus: ReferenceFocus[]
-  imageData?: string
+  imageAssetId?: string
+  imageData?: string // legacy backup/localStorage migration only
   createdAt: string
 }
 
@@ -115,6 +135,7 @@ type Snapshot = {
   docs?: string[]
   references?: ReferenceItem[]
   context?: ProjectContext
+  coreFlows?: CoreFlow[]
 }
 
 type ConfigPreset = {
@@ -141,20 +162,44 @@ type Project = {
   docs: string[]
   config: ProjectConfig
   context: ProjectContext
+  coreFlows: CoreFlow[]
 }
 
 type CustomPattern = Pattern & { custom: true; sourceUrl?: string }
 type CustomCapability = Capability & { custom: true }
 
+type WorkspaceData = {
+  projects: Project[]
+  customPatterns: CustomPattern[]
+  customCapabilities: CustomCapability[]
+  configPresets: ConfigPreset[]
+}
+
+type BackupAsset = {
+  id: string
+  createdAt: string
+  name?: string
+  type?: string
+  dataUrl: string
+}
+
 type BackupBundle = {
-  version: 10
+  version: 12
+  blueprintVersion: '0.24.0'
   exportedAt: string
   activeProjectId: string
   projects: Project[]
   customPatterns: CustomPattern[]
   customCapabilities: CustomCapability[]
   configPresets?: ConfigPreset[]
+  assets?: BackupAsset[]
 }
+
+type SaveState =
+  | { state: 'loading'; message: string }
+  | { state: 'saving'; message: string }
+  | { state: 'saved'; message: string; savedAt?: string }
+  | { state: 'error'; message: string }
 
 const STORAGE = {
   projects: 'blueprint:projects:v2',
@@ -176,8 +221,14 @@ const focusOptions: ReferenceFocus[] = ['Navigation', 'Layout', 'Typography', 'C
 const uid = (prefix = 'id') => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 const now = () => new Date().toISOString()
 
-const safeStore = (key: string, value: unknown) => {
-  try { localStorage.setItem(key, JSON.stringify(value)) } catch (error) { console.warn(`Blueprint could not persist ${key}`, error) }
+const safeStorePreference = (key: string, value: unknown) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+    return true
+  } catch (error) {
+    console.warn(`Blueprint could not persist preference ${key}`, error)
+    return false
+  }
 }
 
 const safeParse = <T,>(key: string, fallback: T): T => {
@@ -202,30 +253,220 @@ const blankProject = (name = 'Untitled app'): Project => ({
   docs: [...defaultDocIds],
   config: createProjectConfig(),
   context: structuredClone(emptyProjectContext),
+  coreFlows: [],
 })
 
-const loadProjects = (): Project[] => {
-  const v2 = safeParse<Project[]>(STORAGE.projects, [])
-  if (v2.length) return v2.map((project) => ({ ...project, dna: normalizeDna(project.dna), references: project.references ?? [], snapshots: (project.snapshots ?? []).map((snapshot) => ({ ...snapshot, dna: normalizeDna(snapshot.dna), context: normalizeProjectContext(snapshot.context) })), capabilities: project.capabilities ?? [], docs: project.docs ?? [...defaultDocIds], config: normalizeProjectConfig(project.config), context: normalizeProjectContext(project.context) }))
+const normalizeReference = (reference: ReferenceItem): ReferenceItem => ({
+  ...reference,
+  title: reference.title || reference.url || 'Untitled reference',
+  url: reference.url ?? '',
+  note: reference.note ?? '',
+  focus: Array.isArray(reference.focus) ? reference.focus : [],
+  createdAt: reference.createdAt || now(),
+})
 
-  const legacySelected = safeParse<string[]>(STORAGE.v1Selected, [])
-  const legacyDna = safeParse<Partial<Dna> & { palette?: string[] }>(STORAGE.v1Dna, {})
-  const legacyName = safeParse<string>(STORAGE.v1Project, 'Untitled app')
-  const migrated: Project = {
-    ...blankProject(legacyName || 'Untitled app'),
-    selected: legacySelected,
-    dna: normalizeDna(legacyDna),
+const normalizeProject = (project: Project): Project => ({
+  ...project,
+  name: project.name || 'Untitled app',
+  createdAt: project.createdAt || now(),
+  updatedAt: project.updatedAt || project.createdAt || now(),
+  selected: Array.isArray(project.selected) ? project.selected : [],
+  dna: normalizeDna(project.dna),
+  references: (project.references ?? []).map(normalizeReference),
+  snapshots: (project.snapshots ?? []).map((snapshot) => ({
+    ...snapshot,
+    selected: Array.isArray(snapshot.selected) ? snapshot.selected : [],
+    dna: normalizeDna(snapshot.dna),
+    capabilities: Array.isArray(snapshot.capabilities) ? snapshot.capabilities : [],
+    docs: Array.isArray(snapshot.docs) ? snapshot.docs : [...defaultDocIds],
+    references: (snapshot.references ?? []).map(normalizeReference),
+    context: normalizeProjectContext(snapshot.context),
+    coreFlows: normalizeCoreFlows(snapshot.coreFlows),
+  })),
+  capabilities: Array.isArray(project.capabilities) ? project.capabilities : [],
+  docs: Array.isArray(project.docs) ? project.docs : [...defaultDocIds],
+  config: normalizeProjectConfig(project.config),
+  context: normalizeProjectContext(project.context),
+  coreFlows: normalizeCoreFlows(project.coreFlows),
+})
+
+const normalizeWorkspace = (workspace: Partial<WorkspaceData> | null | undefined): WorkspaceData => {
+  const normalizedProjects = Array.isArray(workspace?.projects) && workspace.projects.length
+    ? workspace.projects.map(normalizeProject)
+    : [blankProject()]
+  return {
+    projects: normalizedProjects,
+    customPatterns: Array.isArray(workspace?.customPatterns) ? workspace.customPatterns : [],
+    customCapabilities: Array.isArray(workspace?.customCapabilities) ? workspace.customCapabilities : [],
+    configPresets: (Array.isArray(workspace?.configPresets) ? workspace.configPresets : []).filter((preset) => preset && preset.id && preset.name && preset.overrides),
   }
-  return [migrated]
 }
 
-const loadCustomCapabilities = (): CustomCapability[] => safeParse<CustomCapability[]>(STORAGE.customCapabilities, [])
-const loadConfigPresets = (): ConfigPreset[] => safeParse<ConfigPreset[]>(STORAGE.configPresets, []).filter((preset) => preset && preset.id && preset.name && preset.overrides)
+const isWorkspaceData = (value: unknown): value is WorkspaceData => {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<WorkspaceData>
+  return Array.isArray(candidate.projects) && candidate.projects.length > 0
+    && Array.isArray(candidate.customPatterns)
+    && Array.isArray(candidate.customCapabilities)
+    && Array.isArray(candidate.configPresets)
+}
 
-const loadCustomPatterns = (): CustomPattern[] => {
-  const v2 = safeParse<CustomPattern[]>(STORAGE.custom, [])
-  if (v2.length) return v2
-  return safeParse<CustomPattern[]>(STORAGE.v1Custom, [])
+const readLegacyWorkspace = (): WorkspaceData | null => {
+  const legacyKeys = [
+    STORAGE.projects,
+    STORAGE.custom,
+    STORAGE.customCapabilities,
+    STORAGE.configPresets,
+    STORAGE.v1Selected,
+    STORAGE.v1Dna,
+    STORAGE.v1Custom,
+    STORAGE.v1Project,
+  ]
+  const hasLegacyData = legacyKeys.some((key) => {
+    try { return localStorage.getItem(key) !== null } catch { return false }
+  })
+  if (!hasLegacyData) return null
+
+  const v2Projects = safeParse<Project[]>(STORAGE.projects, [])
+  let projects: Project[]
+  if (v2Projects.length) {
+    projects = v2Projects
+  } else {
+    const legacySelected = safeParse<string[]>(STORAGE.v1Selected, [])
+    const legacyDna = safeParse<Partial<Dna> & { palette?: string[] }>(STORAGE.v1Dna, {})
+    const legacyName = safeParse<string>(STORAGE.v1Project, 'Untitled app')
+    projects = [{
+      ...blankProject(legacyName || 'Untitled app'),
+      selected: legacySelected,
+      dna: normalizeDna(legacyDna),
+    }]
+  }
+
+  const v2Patterns = safeParse<CustomPattern[]>(STORAGE.custom, [])
+  return normalizeWorkspace({
+    projects,
+    customPatterns: v2Patterns.length ? v2Patterns : safeParse<CustomPattern[]>(STORAGE.v1Custom, []),
+    customCapabilities: safeParse<CustomCapability[]>(STORAGE.customCapabilities, []),
+    configPresets: safeParse<ConfigPreset[]>(STORAGE.configPresets, []),
+  })
+}
+
+const clearLegacyWorkspaceStorage = () => {
+  const keys = [
+    STORAGE.projects,
+    STORAGE.custom,
+    STORAGE.customCapabilities,
+    STORAGE.configPresets,
+    STORAGE.v1Selected,
+    STORAGE.v1Dna,
+    STORAGE.v1Custom,
+    STORAGE.v1Project,
+  ]
+  keys.forEach((key) => {
+    try { localStorage.removeItem(key) } catch { /* preference storage can be unavailable */ }
+  })
+}
+
+const dataUrlToBlob = async (dataUrl: string) => {
+  const response = await fetch(dataUrl)
+  if (!response.ok) throw new Error('Could not migrate a saved reference image.')
+  return response.blob()
+}
+
+const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader()
+  reader.onload = () => resolve(String(reader.result))
+  reader.onerror = () => reject(reader.error ?? new Error('Could not read reference image.'))
+  reader.readAsDataURL(blob)
+})
+
+const migrateInlineReferenceAssets = async (projects: Project[]): Promise<Project[]> => {
+  const assetByInlineImage = new Map<string, string>()
+
+  const migrateReferences = async (references: ReferenceItem[] = []) => Promise.all(references.map(async (reference) => {
+    const { imageData: _legacyImage, ...clean } = reference
+    if (!reference.imageData) return clean as ReferenceItem
+
+    if (reference.imageAssetId) {
+      const existing = await getAssetBlob(reference.imageAssetId)
+      if (!existing) {
+        const blob = await dataUrlToBlob(reference.imageData)
+        await putAsset(blob, { id: reference.imageAssetId, name: reference.title || 'Reference image', createdAt: reference.createdAt })
+      }
+      return clean as ReferenceItem
+    }
+
+    let assetId = assetByInlineImage.get(reference.imageData)
+    if (!assetId) {
+      const blob = await dataUrlToBlob(reference.imageData)
+      assetId = await putAsset(blob, { name: reference.title || 'Reference image', createdAt: reference.createdAt })
+      assetByInlineImage.set(reference.imageData, assetId)
+    }
+    return { ...clean, imageAssetId: assetId } as ReferenceItem
+  }))
+
+  const migrated: Project[] = []
+  for (const project of projects) {
+    const references = await migrateReferences(project.references)
+    const snapshots: Snapshot[] = []
+    for (const snapshot of project.snapshots) {
+      snapshots.push({ ...snapshot, references: await migrateReferences(snapshot.references ?? []) })
+    }
+    migrated.push({ ...project, references, snapshots })
+  }
+  return migrated
+}
+
+
+type HydrationResult = {
+  workspace: WorkspaceData
+  saveState: SaveState
+}
+
+let hydrationPromise: Promise<HydrationResult> | null = null
+
+const hydrateWorkspace = () => {
+  if (hydrationPromise) return hydrationPromise
+  hydrationPromise = (async (): Promise<HydrationResult> => {
+    const loaded = await loadWorkspace<WorkspaceData>(isWorkspaceData)
+    const legacyWorkspace = loaded.data ? null : readLegacyWorkspace()
+    let workspace = loaded.data ? normalizeWorkspace(loaded.data) : legacyWorkspace
+    let message = loaded.source === 'recovery' ? 'Recovered the last known good local copy.' : 'Saved locally in this browser.'
+    let savedAt = loaded.savedAt
+
+    if (!workspace) workspace = normalizeWorkspace(null)
+
+    const hasInlineImages = workspace.projects.some((project) =>
+      project.references.some((reference) => Boolean(reference.imageData))
+      || project.snapshots.some((snapshot) => snapshot.references?.some((reference) => Boolean(reference.imageData))),
+    )
+
+    if (hasInlineImages) {
+      workspace = { ...workspace, projects: await migrateInlineReferenceAssets(workspace.projects) }
+      message = loaded.data ? 'Updated older reference images to resilient asset storage.' : 'Migrated your existing Blueprint workspace.'
+    }
+
+    if (!loaded.data || hasInlineImages || loaded.source === 'recovery') {
+      savedAt = await saveWorkspace({
+        ...workspace,
+        projects: stripInlineImageData(workspace.projects),
+      }, { updateRecovery: loaded.source === 'current' })
+    }
+
+    if (legacyWorkspace || loaded.data) clearLegacyWorkspaceStorage()
+    try {
+      await cleanupOrphanAssets(collectReferencedAssetIds(workspace.projects))
+    } catch (error) {
+      console.warn('Blueprint could not clean unused local assets during startup.', error)
+    }
+    void requestPersistentStorage()
+
+    return {
+      workspace,
+      saveState: { state: 'saved', message, savedAt },
+    }
+  })()
+  return hydrationPromise
 }
 
 const downloadText = (filename: string, text: string, type = 'text/plain') => {
@@ -242,7 +483,7 @@ const downloadText = (filename: string, text: string, type = 'text/plain') => {
 
 const slugify = (value: string) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'blueprint-project'
 
-const imageToDataUrl = async (file: File) => {
+const imageToBlob = async (file: File) => {
   if (!file.type.startsWith('image/')) throw new Error('Please choose an image file.')
   if (file.size > 8 * 1024 * 1024) throw new Error('Image is too large. Keep source images under 8 MB.')
 
@@ -254,7 +495,7 @@ const imageToDataUrl = async (file: File) => {
       image.onerror = () => reject(new Error('Could not read the image.'))
       image.src = source
     })
-    const maxWidth = 1000
+    const maxWidth = 1200
     const scale = Math.min(1, maxWidth / image.naturalWidth)
     const canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
@@ -262,7 +503,9 @@ const imageToDataUrl = async (file: File) => {
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Image processing is unavailable.')
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
-    return canvas.toDataURL('image/jpeg', 0.70)
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Could not compress the reference image.')), 'image/jpeg', 0.78)
+    })
   } finally {
     URL.revokeObjectURL(source)
   }
@@ -431,6 +674,7 @@ function buildConfigHighlights(config: ProjectConfig) {
     `- App type: ${config.appType}`,
     `- Setup profile: ${config.profile}`,
     `- Operational scale: ${resolvedOperationalScale(config)}${config.operationalScale === 'Auto' ? ' (Auto-inferred)' : ' (explicit)'}`,
+    `- Product reuse: ${String(effectiveConfigValue(config, 'product.reuseIntent'))}${effectiveConfigValue(config, 'product.reuseIntent') !== 'Single-purpose application' ? ` · ${String(effectiveConfigValue(config, 'product.deploymentModel'))} · ${String(effectiveConfigValue(config, 'product.moduleModel'))}` : ''}`,
     `- Active business packs: ${packSettings.length ? packSettings.map((setting) => setting.label).join(', ') : 'None / general-purpose'}`,
     `- Deliberate customizations: ${config.overrides.length + Object.keys(config.scopeChoices).length}`,
   ]
@@ -441,13 +685,18 @@ function buildConfigHighlights(config: ProjectConfig) {
   return lines.join('\n')
 }
 
+function formatReviewSignal(signal: ReviewSignal) {
+  return `[${signal.severity.toUpperCase()} · ${signal.category.toUpperCase()}] ${signal.title} — ${signal.detail}`
+}
+
 function buildMarkdown(project: Project, selectedPatterns: Pattern[], selectedCapabilities: Capability[], similarity: ReturnType<typeof similarityReport>) {
   const dna = project.dna
   const config = normalizeProjectConfig(project.config)
   const readiness = configReadiness(config)
-  const criteria = acceptanceCriteria(config)
-  const cases = edgeCases(config)
-  const warnings = configWarnings(config)
+  const criteria = [...acceptanceCriteria(config), ...coreFlowAcceptanceCriteria(project.coreFlows)]
+  const cases = [...edgeCases(config), ...coreFlowFailureCases(project.coreFlows)]
+  const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
+  const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
   const visualSignals = visualReviewSignals(dna)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
@@ -458,7 +707,7 @@ function buildMarkdown(project: Project, selectedPatterns: Pattern[], selectedCa
     : '- No external references saved.'
   const docs = projectDocs.filter((doc) => project.docs.includes(doc.id))
 
-  return `# ${project.name}\n\n## Blueprint summary\n${buildConfigHighlights(config)}\n- Readiness: ${readiness.score}% — ${readiness.label}\n- Decision coverage: ${readiness.coverage}%\n${warnings.length + contextSignals.length + visualSignals.length + layerSignals.length ? `- Review signals: ${warnings.length + contextSignals.length + visualSignals.length + layerSignals.length} (${warnings.length} App Setup, ${contextSignals.length} Project Context advisory, ${visualSignals.length} visual, ${layerSignals.length} cross-layer)` : '- Review signals: None'}\n\n## User-provided project context — optional / verbatim\n${projectContextPrompt(project.context)}\n\nThis context is interpretive guidance only. It must not create, remove, or override structured Blueprint scope.\n\n## Acceptance criteria\n${criteria.map((item) => `- ${item}`).join('\n')}\n\n## Edge cases to prove\n${cases.map((item) => `- ${item}`).join('\n')}\n\n${warnings.length ? `## App Setup review signals\n${warnings.map((warning) => `- ${warning}`).join('\n')}\n\n` : ''}${contextSignals.length ? `## Project Context review signals — advisory only\nThese signals do not change structured scope. Review them only if they reveal that App Setup does not match the user's stated intent.\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\n\n` : ''}${visualSignals.length ? `## Visual review signals\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Product direction\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n\n## Product capabilities\n${resolvedCapabilities.length ? resolvedCapabilities.map((cap) => `### ${cap.name}\n${cap.prompt}\nBest fit: ${cap.bestFor}\nWatchout: ${cap.watchout}`).join('\n\n') : 'No active compatible product capabilities selected yet.'}\n\n## Visual Studio — structured visual contract\n- Personality: ${dna.personality}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n\n${visualDnaContract(dna)}\n\n## Selected visual patterns\n${resolvedPatterns.length ? resolvedPatterns.map((pattern) => `### ${pattern.name}\n${pattern.prompt}\nBest fit: ${pattern.bestFor}\nWatchout: ${pattern.watchout}`).join('\n\n') : 'No active compatible visual patterns selected yet.'}\n\n${layerSignals.length ? `## Cross-layer review\nThese saved selections are preserved but intentionally excluded from implementation direction until App Setup makes them compatible:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Directional references\n${references}\n\n## MVP documentation to generate\n${docs.length ? docs.map((doc) => `- ${doc.filename} — ${doc.summary}`).join('\n') : '- No project documentation files selected.'}\n\n## Variety check\n${similarity.score === null ? 'No prior project is available for comparison yet.' : `Closest saved project: ${similarity.project?.name} (${similarity.score}% similarity). Status: ${similarity.label}.`}\n\n## Full active app-setup contract\nThis appendix is intentionally exhaustive for implementation agents. The summary above is the human review surface.\n\n${buildConfigMarkdown(config)}\n\n## Implementation principle\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required/inferred structured dependencies and hard Blueprint constraints, (3) user-provided Project Context as interpretive guidance only, (4) recommended behavior/quality defaults inside active scope, then (5) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Preserve usability, responsiveness, accessibility, data integrity, and the app's actual workflow. References are directional; do not copy external designs verbatim. Avoid generic SaaS styling, arbitrary visual effects, repetitive admin work that can reasonably be automated, and repeating the same visual language across unrelated projects.\n`
+  return `# ${project.name}\n\n## Blueprint summary\n${buildConfigHighlights(config)}\n- Readiness: ${readiness.label} (${readiness.score}% coherence indicator)\n- Decision coverage: ${readiness.coverage}%\n- App Setup severity: ${readiness.blockers} blocker · ${readiness.important} important · ${readiness.review} review · ${readiness.advisory} advisory\n${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length ? `- Review signals: ${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length} (${reviewSignals.length} App Setup typed, ${contextSignals.length} Project Context advisory, ${visualSignals.length} visual, ${layerSignals.length} cross-layer)` : '- Review signals: None'}\n\n## User-provided project context — optional / verbatim\n${projectContextPrompt(project.context)}\n\nThis context is interpretive guidance only. It must not create, remove, or override structured Blueprint scope.\n\n## Core flows — user-authored workflow truth\n${coreFlowsMarkdown(project.coreFlows, 3)}\n\nCore flows describe intended actor journeys only inside the resolved App Setup scope. They must not activate a capability that App Setup explicitly or contextually excludes.\n\n## Derived implementation roadmap\n${implementationRoadmapMarkdown(roadmap, 3)}\n\nThe roadmap is sequencing guidance derived from App Setup + Core Flows. It never creates scope, and a roadmap item must be narrowed or dropped when its underlying App Setup scope is inactive.\n\n## Acceptance criteria\n${criteria.map((item) => `- ${item}`).join('\n')}\n\n## Edge cases to prove\n${cases.map((item) => `- ${item}`).join('\n')}\n\n${reviewSignals.length ? `## App Setup review signals — typed by severity\n${reviewSignals.map((signal) => `- ${formatReviewSignal(signal)}`).join('\n')}\n\n` : ''}${contextSignals.length ? `## Project Context review signals — advisory only\nThese signals do not change structured scope. Review them only if they reveal that App Setup does not match the user's stated intent.\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\n\n` : ''}${visualSignals.length ? `## Visual review signals\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Product direction\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n\n## Product capabilities\n${resolvedCapabilities.length ? resolvedCapabilities.map((cap) => `### ${cap.name}\n${cap.prompt}\nBest fit: ${cap.bestFor}\nWatchout: ${cap.watchout}`).join('\n\n') : 'No active compatible product capabilities selected yet.'}\n\n## Visual Studio — structured visual contract\n- Personality: ${dna.personality}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n\n${visualDnaContract(dna)}\n\n## Selected visual patterns\n${resolvedPatterns.length ? resolvedPatterns.map((pattern) => `### ${pattern.name}\n${pattern.prompt}\nBest fit: ${pattern.bestFor}\nWatchout: ${pattern.watchout}`).join('\n\n') : 'No active compatible visual patterns selected yet.'}\n\n${layerSignals.length ? `## Cross-layer review\nThese saved selections are preserved but intentionally excluded from implementation direction until App Setup makes them compatible:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Directional references\n${references}\n\n## MVP documentation to generate\n${docs.length ? docs.map((doc) => `- ${doc.filename} — ${doc.summary}`).join('\n') : '- No project documentation files selected.'}\n\n## Variety check\n${similarity.score === null ? 'No prior project is available for comparison yet.' : `Closest saved project: ${similarity.project?.name} (${similarity.score}% similarity). Status: ${similarity.label}.`}\n\n## Full active app-setup contract\nThis appendix is intentionally exhaustive for implementation agents. The summary above is the human review surface.\n\n${buildConfigMarkdown(config)}\n\n## Implementation principle\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required/inferred structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices constrain how already-selected product scope is packaged, isolated, configured, and upgraded across organizations; they never activate a business capability by themselves. The Derived Implementation Roadmap is sequencing guidance only and cannot create or override scope. Preserve usability, responsiveness, accessibility, data integrity, and the app's actual workflow. References are directional; do not copy external designs verbatim. Avoid generic SaaS styling, arbitrary visual effects, repetitive admin work that can reasonably be automated, and repeating the same visual language across unrelated projects.\n`
 }
 
 function buildDocsManifest(project: Project, selectedCapabilities: Capability[]) {
@@ -466,35 +715,40 @@ function buildDocsManifest(project: Project, selectedCapabilities: Capability[])
   const config = normalizeProjectConfig(project.config)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
   const capabilityNames = resolvedCapabilities.map((cap) => cap.name).join(', ') || 'No active capabilities selected yet'
-  return `# Documentation Manifest — ${project.name}\n\nGenerate and maintain these files as part of the MVP. Keep each document concise, repository-specific, and updated when implementation materially changes.\n\nSelected capabilities: ${capabilityNames}\n\n${docs.map((doc) => `## ${doc.filename}\nPurpose: ${doc.summary}\nWhy it exists: ${doc.why}\nSuggested sections:\n${doc.sections.map((section) => `- ${section}`).join('\n')}`).join('\n\n')}\n\n## Documentation rule\nDo not create filler documentation. Every selected file must contain project-specific decisions, commands, constraints, and current truth. Cross-link related docs instead of duplicating large sections.\n`
+  const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
+  return `# Documentation Manifest — ${project.name}\n\nGenerate and maintain these files as part of the MVP. Keep each document concise, repository-specific, and updated when implementation materially changes.\n\nSelected capabilities: ${capabilityNames}\nCore flows captured: ${project.coreFlows.length}\nDerived implementation phases: ${roadmap.phases.length}\n\n${docs.map((doc) => `## ${doc.filename}\nPurpose: ${doc.summary}\nWhy it exists: ${doc.why}\nSuggested sections:\n${doc.sections.map((section) => `- ${section}`).join('\n')}`).join('\n\n')}\n\n## Documentation rule\nDo not create filler documentation. Every selected file must contain project-specific decisions, commands, constraints, and current truth. Cross-link related docs instead of duplicating large sections.\n`
 }
 
 function buildAgentPrompt(project: Project, selectedPatterns: Pattern[], selectedCapabilities: Capability[]) {
   const dna = project.dna
   const config = normalizeProjectConfig(project.config)
   const docs = projectDocs.filter((doc) => project.docs.includes(doc.id))
-  const criteria = acceptanceCriteria(config)
-  const cases = edgeCases(config)
-  const warnings = configWarnings(config)
+  const criteria = [...acceptanceCriteria(config), ...coreFlowAcceptanceCriteria(project.coreFlows)]
+  const cases = [...edgeCases(config), ...coreFlowFailureCases(project.coreFlows)]
+  const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
+  const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
   const visualSignals = visualReviewSignals(dna)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
   const resolvedPatterns = activePatterns(selectedPatterns, config)
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
-  return `Build or improve “${project.name}” according to this Blueprint. Preserve working behavior unless a change is explicitly required.\n\nBLUEPRINT SUMMARY\n${buildConfigHighlights(config)}\n- Usability is non-negotiable: common paths must be obvious, advanced/irrelevant controls progressively disclosed, user work preserved, and recovery from errors clear.\n${warnings.length ? `- Resolve these App Setup review signals deliberately before calling the implementation complete:\n${warnings.map((warning) => `  - ${warning}`).join('\n')}` : '- The current Blueprint has no App Setup review signals.'}\n${contextSignals.length ? `- Project Context advisory review: ${contextSignals.length} possible scope mismatch${contextSignals.length > 1 ? 'es' : ''}. These are suggestions only and MUST NOT change scope automatically.` : '- Project Context advisory review: No obvious structured-scope mismatch detected.'}
-${visualSignals.length ? `- Visual review: ${visualSignals.length} deterministic color/design sanity signal${visualSignals.length > 1 ? 's' : ''} should be resolved or deliberately accepted.` : '- Visual review: No obvious deterministic visual tension.'}\n${layerSignals.length ? `- Cross-layer review: ${layerSignals.length} saved selection${layerSignals.length > 1 ? 's are' : ' is'} excluded from implementation direction until App Setup becomes compatible.` : '- Cross-layer review: No saved selection conflicts.'}\n\nUSER-PROVIDED PROJECT CONTEXT — OPTIONAL / VERBATIM\n${projectContextPrompt(project.context)}\nInterpret these answers as human intent and priorities only. Do not translate them into new product scope, do not silently change structured choices, and do not let them override explicit or resolved App Setup.
-${contextSignals.length ? `\nPROJECT CONTEXT REVIEW SIGNALS — ADVISORY ONLY\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\nTreat these as prompts for human review, never as authorization to add features.` : ''}\n\nACCEPTANCE CRITERIA\n${criteria.map((item) => `- ${item}`).join('\n')}\n\nEDGE CASES TO TEST\n${cases.map((item) => `- ${item}`).join('\n')}\n\nFULL APP SETUP CONTRACT\n${buildConfigPrompt(config)}\n\nPRODUCT CAPABILITIES\n${resolvedCapabilities.length ? resolvedCapabilities.map((c) => `- ${c.name}: ${c.prompt}`).join('\n') : '- No active compatible capabilities selected; do not invent major product scope.'}\n\nVISUAL STUDIO — STRUCTURED VISUAL CONTRACT\n- Personality: ${dna.personality}\n- Ease of use: ${dna.easePriority}. Creative stretch: ${dna.stretch}.\n${visualDnaContract(dna, true)}\n\n${visualSignals.length ? `VISUAL REVIEW SIGNALS\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}VISUAL PATTERNS TO INTERPRET, NOT COPY AS A TEMPLATE\n${resolvedPatterns.length ? resolvedPatterns.map((p) => `- ${p.name}: ${p.prompt}`).join('\n') : '- No active compatible visual patterns selected; derive a coherent system from the structured Visual Studio contract.'}\n\n${layerSignals.length ? `CROSS-LAYER REVIEW — SAVED BUT EXCLUDED\nThe following saved capability/pattern choices conflict with resolved App Setup. Do not implement them unless the structured setting is changed:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}REFERENCES\n${project.references.length ? project.references.map((ref) => `- ${ref.title}: use only for ${ref.focus.join(', ') || 'the noted direction'}. ${ref.note}`).join('\n') : '- None supplied.'}\n\nMVP PROJECT DOCS\nGenerate and maintain these repository files as part of the implementation:\n${docs.length ? docs.map((doc) => `- ${doc.filename}: ${doc.summary}`).join('\n') : '- No additional Markdown files selected.'}\n\nGUARDRAILS\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required/inferred structured dependencies and hard Blueprint constraints, (3) user-provided Project Context as interpretive guidance only, (4) recommended behavior/quality defaults inside active scope, then (5) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Keep capabilities modular and authorization/server validation explicit. Minimize repetitive manual operations when safe automation is reasonable. Keep the interface internally consistent but visually distinct from unrelated past projects. Do not add generic SaaS decoration, arbitrary gradients/glows, excessive cards, or motion that delays tasks. Use strong hierarchy, deliberate spacing, accessible contrast, large touch targets where applicable, and reduced-motion fallbacks for meaningful animation. Before completion, run the project’s validation/build/test commands, prove the acceptance criteria and relevant edge cases, resolve review signals, and update the selected documentation to match the final implementation.`
+  return `Build or improve “${project.name}” according to this Blueprint. Preserve working behavior unless a change is explicitly required.\n\nBLUEPRINT SUMMARY\n${buildConfigHighlights(config)}\n- Usability is non-negotiable: common paths must be obvious, advanced/irrelevant controls progressively disclosed, user work preserved, and recovery from errors clear.\n${reviewSignals.length ? `- Resolve these typed App Setup review signals deliberately before calling the implementation complete:\n${reviewSignals.map((signal) => `  - ${formatReviewSignal(signal)}`).join('\n')}` : '- The current Blueprint has no App Setup review signals.'}\n${contextSignals.length ? `- Project Context advisory review: ${contextSignals.length} possible scope mismatch${contextSignals.length > 1 ? 'es' : ''}. These are suggestions only and MUST NOT change scope automatically.` : '- Project Context advisory review: No obvious structured-scope mismatch detected.'}
+${visualSignals.length ? `- Visual review: ${visualSignals.length} deterministic color/design sanity signal${visualSignals.length > 1 ? 's' : ''} should be resolved or deliberately accepted.` : '- Visual review: No obvious deterministic visual tension.'}\n${layerSignals.length ? `- Cross-layer review: ${layerSignals.length} saved selection${layerSignals.length > 1 ? 's are' : ' is'} excluded from implementation direction until App Setup becomes compatible.` : '- Cross-layer review: No saved selection conflicts.'}\n\nCORE FLOWS — USER-AUTHORED WORKFLOW CONTRACT\n${coreFlowsPrompt(project.coreFlows)}\nTreat these flows as explicit workflow intent only within resolved App Setup scope. Never enable a capability solely because a flow mentions it; if a flow conflicts with App Setup, preserve App Setup scope and surface the conflict for human review rather than inventing scope.\n\nDERIVED IMPLEMENTATION ROADMAP — SEQUENCING, NOT SCOPE\n${implementationRoadmapPrompt(roadmap)}\nFollow this as a recommended dependency/order plan. It is fully derived from the structured Blueprint and Core Flows; it cannot authorize a feature that resolved App Setup excludes. Parallelize phases only when their shared contracts are stable.\n\nUSER-PROVIDED PROJECT CONTEXT — OPTIONAL / VERBATIM\n${projectContextPrompt(project.context)}\nInterpret these answers as human intent and priorities only. Do not translate them into new product scope, do not silently change structured choices, and do not let them override explicit or resolved App Setup.
+${contextSignals.length ? `\nPROJECT CONTEXT REVIEW SIGNALS — ADVISORY ONLY\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\nTreat these as prompts for human review, never as authorization to add features.` : ''}\n\nACCEPTANCE CRITERIA\n${criteria.map((item) => `- ${item}`).join('\n')}\n\nEDGE CASES TO TEST\n${cases.map((item) => `- ${item}`).join('\n')}\n\nFULL APP SETUP CONTRACT\n${buildConfigPrompt(config)}\n\nPRODUCT CAPABILITIES\n${resolvedCapabilities.length ? resolvedCapabilities.map((c) => `- ${c.name}: ${c.prompt}`).join('\n') : '- No active compatible capabilities selected; do not invent major product scope.'}\n\nVISUAL STUDIO — STRUCTURED VISUAL CONTRACT\n- Personality: ${dna.personality}\n- Ease of use: ${dna.easePriority}. Creative stretch: ${dna.stretch}.\n${visualDnaContract(dna, true)}\n\n${visualSignals.length ? `VISUAL REVIEW SIGNALS\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}VISUAL PATTERNS TO INTERPRET, NOT COPY AS A TEMPLATE\n${resolvedPatterns.length ? resolvedPatterns.map((p) => `- ${p.name}: ${p.prompt}`).join('\n') : '- No active compatible visual patterns selected; derive a coherent system from the structured Visual Studio contract.'}\n\n${layerSignals.length ? `CROSS-LAYER REVIEW — SAVED BUT EXCLUDED\nThe following saved capability/pattern choices conflict with resolved App Setup. Do not implement them unless the structured setting is changed:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}REFERENCES\n${project.references.length ? project.references.map((ref) => `- ${ref.title}: use only for ${ref.focus.join(', ') || 'the noted direction'}. ${ref.note}`).join('\n') : '- None supplied.'}\n\nMVP PROJECT DOCS\nGenerate and maintain these repository files as part of the implementation:\n${docs.length ? docs.map((doc) => `- ${doc.filename}: ${doc.summary}`).join('\n') : '- No additional Markdown files selected.'}\n\nGUARDRAILS\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required/inferred structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices define packaging, tenant isolation, module/configuration boundaries, and upgrade strategy for already-selected scope; never treat them as permission to invent business modules. Treat the Derived Implementation Roadmap as sequencing guidance only; it never adds scope. Keep capabilities modular and authorization/server validation explicit. Minimize repetitive manual operations when safe automation is reasonable. Keep the interface internally consistent but visually distinct from unrelated past projects. Do not add generic SaaS decoration, arbitrary gradients/glows, excessive cards, or motion that delays tasks. Use strong hierarchy, deliberate spacing, accessible contrast, large touch targets where applicable, and reduced-motion fallbacks for meaningful animation. Before completion, run the project’s validation/build/test commands, prove the acceptance criteria and relevant edge cases, resolve review signals, and update the selected documentation to match the final implementation.`
 }
 
 export default function App() {
   const [view, setView] = useState<View>('home')
   const [mobileMenu, setMobileMenu] = useState(false)
-  const [projects, setProjects] = useState<Project[]>(loadProjects)
+  const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState(() => safeParse<string>(STORAGE.activeProject, ''))
-  const [customPatterns, setCustomPatterns] = useState<CustomPattern[]>(loadCustomPatterns)
-  const [customCapabilities, setCustomCapabilities] = useState<CustomCapability[]>(loadCustomCapabilities)
-  const [configPresets, setConfigPresets] = useState<ConfigPreset[]>(loadConfigPresets)
+  const [customPatterns, setCustomPatterns] = useState<CustomPattern[]>([])
+  const [customCapabilities, setCustomCapabilities] = useState<CustomCapability[]>([])
+  const [configPresets, setConfigPresets] = useState<ConfigPreset[]>([])
   const [learningMode, setLearningMode] = useState(() => safeParse<boolean>(STORAGE.learning, true))
+  const [persistenceReady, setPersistenceReady] = useState(false)
+  const [saveState, setSaveState] = useState<SaveState>({ state: 'loading', message: 'Opening local workspace…' })
+  const [saveRetryNonce, setSaveRetryNonce] = useState(0)
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<'All' | PatternCategory>('All')
   const [level, setLevel] = useState<'All' | PatternLevel>('All')
@@ -510,26 +764,103 @@ export default function App() {
   const [showPowerTools, setShowPowerTools] = useState(false)
   const [toast, setToast] = useState('')
   const importRef = useRef<HTMLInputElement | null>(null)
+  const saveTimerRef = useRef<number | null>(null)
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
+  const saveRevisionRef = useRef(0)
+  const skipNextAutosaveRef = useRef(false)
 
   const allPatterns = useMemo(() => [...patterns, ...customPatterns], [customPatterns])
   const allCapabilities = useMemo(() => [...capabilities, ...customCapabilities], [customCapabilities])
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? projects[0]
 
   useEffect(() => {
+    let cancelled = false
+
+    void hydrateWorkspace()
+      .then(({ workspace, saveState: hydratedSaveState }) => {
+        if (cancelled) return
+        setProjects(workspace.projects)
+        setCustomPatterns(workspace.customPatterns)
+        setCustomCapabilities(workspace.customCapabilities)
+        setConfigPresets(workspace.configPresets)
+        setPersistenceReady(true)
+        setSaveState(hydratedSaveState)
+      })
+      .catch((error) => {
+        const fallback = readLegacyWorkspace() ?? normalizeWorkspace(null)
+        if (cancelled) return
+        setProjects(fallback.projects)
+        setCustomPatterns(fallback.customPatterns)
+        setCustomCapabilities(fallback.customCapabilities)
+        setConfigPresets(fallback.configPresets)
+        setPersistenceReady(true)
+        setSaveState({
+          state: 'error',
+          message: error instanceof Error
+            ? `${error.message} Changes are in memory only; export a backup before closing.`
+            : 'Local saving is unavailable. Changes are in memory only; export a backup before closing.',
+        })
+      })
+
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!persistenceReady) return
     if (!activeProjectId && projects[0]) setActiveProjectId(projects[0].id)
     if (activeProjectId && !projects.some((project) => project.id === activeProjectId) && projects[0]) setActiveProjectId(projects[0].id)
-  }, [activeProjectId, projects])
+  }, [activeProjectId, persistenceReady, projects])
 
-  useEffect(() => safeStore(STORAGE.projects, projects), [projects])
-  useEffect(() => { if (activeProjectId) safeStore(STORAGE.activeProject, activeProjectId) }, [activeProjectId])
-  useEffect(() => safeStore(STORAGE.custom, customPatterns), [customPatterns])
-  useEffect(() => safeStore(STORAGE.customCapabilities, customCapabilities), [customCapabilities])
-  useEffect(() => safeStore(STORAGE.configPresets, configPresets), [configPresets])
-  useEffect(() => safeStore(STORAGE.learning, learningMode), [learningMode])
+  useEffect(() => {
+    if (!persistenceReady || !projects.length) return
+    if (skipNextAutosaveRef.current) {
+      skipNextAutosaveRef.current = false
+      return
+    }
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+
+    const revision = ++saveRevisionRef.current
+    const workspace: WorkspaceData = {
+      projects: stripInlineImageData(projects),
+      customPatterns,
+      customCapabilities,
+      configPresets,
+    }
+    setSaveState({ state: 'saving', message: 'Saving locally…' })
+
+    saveTimerRef.current = window.setTimeout(() => {
+      saveChainRef.current = saveChainRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const savedAt = await saveWorkspace(workspace)
+          if (saveRevisionRef.current === revision) setSaveState({ state: 'saved', message: 'Saved locally in this browser.', savedAt })
+        })
+        .catch((error) => {
+          if (saveRevisionRef.current !== revision) return
+          setSaveState({
+            state: 'error',
+            message: error instanceof Error
+              ? `${error.message} Export a backup before closing.`
+              : 'Could not save locally. Export a backup before closing.',
+          })
+        })
+    }, 320)
+
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    }
+  }, [configPresets, customCapabilities, customPatterns, persistenceReady, projects, saveRetryNonce])
+
+  useEffect(() => { if (activeProjectId) safeStorePreference(STORAGE.activeProject, activeProjectId) }, [activeProjectId])
+  useEffect(() => { safeStorePreference(STORAGE.learning, learningMode) }, [learningMode])
 
   const notify = (message: string) => {
     setToast(message)
     window.setTimeout(() => setToast(''), 1900)
+  }
+
+  if (!persistenceReady) {
+    return <div className="boot-screen"><div className="brand-mark"><Sparkles size={18}/></div><LoaderCircle size={22} className="spin"/><strong>Opening Blueprint</strong><span>{saveState.message}</span></div>
   }
 
   if (!activeProject) return null
@@ -660,6 +991,7 @@ export default function App() {
       dna: structuredClone(activeProject.dna),
       config: structuredClone(activeProject.config),
       context: structuredClone(activeProject.context),
+      coreFlows: structuredClone(activeProject.coreFlows),
       references: activeProject.references.map((ref) => ({ ...ref, id: uid('ref') })),
       snapshots: [],
     }
@@ -692,6 +1024,7 @@ export default function App() {
       docs: [...activeProject.docs],
       references: structuredClone(activeProject.references),
       context: structuredClone(activeProject.context),
+      coreFlows: structuredClone(activeProject.coreFlows),
     }
     updateProject((project) => ({ snapshots: [snapshot, ...project.snapshots].slice(0, 24) }))
     notify('Design checkpoint saved')
@@ -706,6 +1039,7 @@ export default function App() {
       ...(snapshot.docs ? { docs: [...snapshot.docs] } : {}),
       ...(snapshot.references ? { references: structuredClone(snapshot.references) } : {}),
       ...(snapshot.context ? { context: normalizeProjectContext(snapshot.context) } : {}),
+      ...(snapshot.coreFlows ? { coreFlows: normalizeCoreFlows(snapshot.coreFlows) } : {}),
     })
     notify('Checkpoint restored')
   }
@@ -744,16 +1078,29 @@ export default function App() {
 
   const addReference = async (form: HTMLFormElement, imageFile?: File) => {
     const data = new FormData(form)
-    let imageData: string | undefined
-    try {
-      if (imageFile) imageData = await imageToDataUrl(imageFile)
-    } catch (error) {
-      notify(error instanceof Error ? error.message : 'Could not process image')
-      return
+    let imageAssetId: string | undefined
+    if (imageFile) {
+      let blob: Blob
+      try {
+        blob = await imageToBlob(imageFile)
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Could not process image')
+        return
+      }
+      try {
+        imageAssetId = await putAsset(blob, { name: imageFile.name })
+      } catch (error) {
+        setSaveState({
+          state: 'error',
+          message: error instanceof Error ? `Reference image was not saved: ${error.message}` : 'Reference image was not saved locally.',
+        })
+        notify('Could not save the reference image locally. Try again before closing Blueprint.')
+        return
+      }
     }
     const title = String(data.get('title') || '').trim()
     const url = String(data.get('url') || '').trim()
-    if (!title && !url && !imageData) {
+    if (!title && !url && !imageAssetId) {
       notify('Add a title, URL, or image')
       return
     }
@@ -763,7 +1110,7 @@ export default function App() {
       url,
       note: String(data.get('note') || '').trim(),
       focus: data.getAll('focus').map(String) as ReferenceFocus[],
-      imageData,
+      imageAssetId,
       createdAt: now(),
     }
     updateProject((project) => ({ references: [reference, ...project.references] }))
@@ -776,25 +1123,125 @@ export default function App() {
     notify('Reference removed')
   }
 
-  const exportBackup = () => {
-    const bundle: BackupBundle = { version: 10, exportedAt: now(), activeProjectId: activeProject.id, projects, customPatterns, customCapabilities, configPresets }
-    downloadText(`blueprint-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2), 'application/json')
-    notify('Backup exported')
+  const exportBackup = async () => {
+    try {
+      const portableProjects = structuredClone(projects)
+      const inlineAssetBlobs = new Map<string, Blob>()
+      const inlineIds = new Map<string, string>()
+
+      const prepareReferences = async (references: ReferenceItem[] = []) => Promise.all(references.map(async (reference) => {
+        if (!reference.imageData) return reference
+        let id = reference.imageAssetId || inlineIds.get(reference.imageData)
+        if (!id) {
+          id = uid('asset')
+          inlineIds.set(reference.imageData, id)
+        }
+        if (!inlineAssetBlobs.has(id)) inlineAssetBlobs.set(id, await dataUrlToBlob(reference.imageData))
+        const { imageData: _inlineImage, ...clean } = reference
+        return { ...clean, imageAssetId: id } as ReferenceItem
+      }))
+
+      for (const project of portableProjects) {
+        project.references = await prepareReferences(project.references)
+        for (const snapshot of project.snapshots) snapshot.references = await prepareReferences(snapshot.references ?? [])
+      }
+
+      const cleanProjects = stripInlineImageData(portableProjects)
+      const assets: BackupAsset[] = []
+      for (const id of collectReferencedAssetIds(cleanProjects)) {
+        const blob = inlineAssetBlobs.get(id) ?? await getAssetBlob(id)
+        if (!blob) throw new Error('A saved reference image is missing from local asset storage. Remove the broken reference or add the image again before exporting.')
+        assets.push({
+          id,
+          createdAt: now(),
+          type: blob.type || undefined,
+          dataUrl: await blobToDataUrl(blob),
+        })
+      }
+      const bundle: BackupBundle = {
+        version: 12,
+        blueprintVersion: '0.24.0',
+        exportedAt: now(),
+        activeProjectId: activeProject.id,
+        projects: cleanProjects,
+        customPatterns,
+        customCapabilities,
+        configPresets,
+        assets,
+      }
+      downloadText(`blueprint-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(bundle, null, 2), 'application/json')
+      notify('Backup exported with reference assets')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not export backup')
+    }
   }
 
   const importBackup = async (file: File) => {
+    let preImportSavedAt: string | undefined
     try {
-      const parsed = JSON.parse(await file.text()) as Partial<BackupBundle>
-      if (![2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number(parsed.version)) || !Array.isArray(parsed.projects) || !parsed.projects.length) throw new Error('Not a compatible Blueprint backup.')
-      const restored = parsed.projects.map((project) => ({ ...project, dna: normalizeDna(project.dna), references: project.references ?? [], snapshots: (project.snapshots ?? []).map((snapshot) => ({ ...snapshot, dna: normalizeDna(snapshot.dna), context: normalizeProjectContext(snapshot.context) })), capabilities: project.capabilities ?? [], docs: project.docs ?? [...defaultDocIds], config: normalizeProjectConfig(project.config), context: normalizeProjectContext(project.context) })) as Project[]
-      setProjects(restored)
-      setCustomPatterns(Array.isArray(parsed.customPatterns) ? parsed.customPatterns : [])
-      setCustomCapabilities(Array.isArray(parsed.customCapabilities) ? parsed.customCapabilities : [])
-      setConfigPresets(Array.isArray(parsed.configPresets) ? parsed.configPresets : [])
-      setActiveProjectId(parsed.activeProjectId && restored.some((p) => p.id === parsed.activeProjectId) ? parsed.activeProjectId : restored[0].id)
+      const parsed = JSON.parse(await file.text()) as Partial<BackupBundle> & { version?: number }
+      if (![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(Number(parsed.version)) || !Array.isArray(parsed.projects) || !parsed.projects.length) throw new Error('Not a compatible Blueprint backup.')
+
+      let restored = parsed.projects.map(normalizeProject)
+      const backupAssets = Array.isArray(parsed.assets) ? parsed.assets : []
+      if (Number(parsed.version) >= 11) {
+        const suppliedIds = new Set(backupAssets.filter((asset) => asset?.id && asset?.dataUrl).map((asset) => asset.id))
+        const missingIds = collectReferencedAssetIds(restored).filter((id) => !suppliedIds.has(id))
+        if (missingIds.length) throw new Error(`Backup is missing ${missingIds.length} referenced image asset${missingIds.length === 1 ? '' : 's'}.`)
+      }
+
+      // Make the latest in-memory workspace durable before any import-side writes.
+      // That exact pre-import state will become recovery when the imported workspace is committed.
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+      }
+      saveRevisionRef.current += 1
+      await saveChainRef.current.catch(() => undefined)
+      setSaveState({ state: 'saving', message: 'Protecting current workspace before import…' })
+      preImportSavedAt = await saveWorkspace({
+        projects: stripInlineImageData(projects),
+        customPatterns,
+        customCapabilities,
+        configPresets,
+      })
+
+      if (Number(parsed.version) >= 11) {
+        for (const asset of backupAssets) {
+          if (!asset?.id || !asset.dataUrl) continue
+          const blob = await dataUrlToBlob(asset.dataUrl)
+          await putAsset(blob, { id: asset.id, name: asset.name, createdAt: asset.createdAt })
+        }
+      }
+
+      restored = await migrateInlineReferenceAssets(restored)
+      const workspace: WorkspaceData = {
+        projects: stripInlineImageData(restored),
+        customPatterns: Array.isArray(parsed.customPatterns) ? parsed.customPatterns : [],
+        customCapabilities: Array.isArray(parsed.customCapabilities) ? parsed.customCapabilities : [],
+        configPresets: Array.isArray(parsed.configPresets) ? parsed.configPresets : [],
+      }
+      const savedAt = await saveWorkspace(workspace)
+      await cleanupOrphanAssets(collectReferencedAssetIds(workspace.projects))
+
+      skipNextAutosaveRef.current = true
+      setProjects(workspace.projects)
+      setCustomPatterns(workspace.customPatterns)
+      setCustomCapabilities(workspace.customCapabilities)
+      setConfigPresets(workspace.configPresets)
+      setActiveProjectId(parsed.activeProjectId && workspace.projects.some((project) => project.id === parsed.activeProjectId) ? parsed.activeProjectId : workspace.projects[0].id)
+      setSaveState({ state: 'saved', message: 'Imported backup saved locally.', savedAt })
       setView('home')
-      notify('Backup imported')
+      notify('Backup imported and saved locally')
     } catch (error) {
+      if (preImportSavedAt) {
+        setSaveState({ state: 'saved', message: 'Import stopped; your current workspace remains saved locally.', savedAt: preImportSavedAt })
+        try {
+          await cleanupOrphanAssets(collectReferencedAssetIds(projects))
+        } catch (cleanupError) {
+          console.warn('Blueprint could not clean partial import assets.', cleanupError)
+        }
+      }
       notify(error instanceof Error ? error.message : 'Could not import backup')
     } finally {
       if (importRef.current) importRef.current.value = ''
@@ -818,6 +1265,8 @@ export default function App() {
     { id: 'spec' as View, label: 'Generated spec', icon: ClipboardList },
   ]
   const toolNav = [
+    { id: 'flows' as View, label: 'Core flows', icon: ListChecks, count: activeProject.coreFlows.length || undefined },
+    { id: 'roadmap' as View, label: 'Implementation roadmap', icon: ArrowRight },
     { id: 'patterns' as View, label: 'Pattern explorer', icon: Grid3X3, count: activeProject.selected.length || undefined },
     { id: 'capabilities' as View, label: 'Product capabilities', icon: Settings2, count: activeProject.capabilities.length || undefined },
     { id: 'docs' as View, label: 'Project docs', icon: FileText, count: activeProject.docs.length || undefined },
@@ -839,15 +1288,18 @@ export default function App() {
         {(showPowerTools || powerToolActive) && <div className="nav-tools">{toolNav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><item.icon size={16}/><span>{item.label}</span>{item.count ? <b>{item.count}</b> : null}</button>)}</div>}
       </nav>
       <div className="sidebar-note"><div className="eyebrow"><WandSparkles size={13}/> Configurable core</div><p>Auto resolves scope. Customize only the product decisions your project actually needs.</p></div>
+      <SaveStatus status={saveState} onRetry={() => setSaveRetryNonce((value) => value + 1)}/>
     </aside>
 
-    <header className="mobile-header"><button className="brand compact" onClick={() => navigate('home')}><span className="brand-mark"><Sparkles size={16}/></span><span><strong>Blueprint</strong><small>{activeProject.name}</small></span></button><button className="icon-button" onClick={() => setMobileMenu(true)} aria-label="Open menu"><Menu size={19}/></button></header>
+    <header className="mobile-header"><button className="brand compact" onClick={() => navigate('home')}><span className="brand-mark"><Sparkles size={16}/></span><span><strong>Blueprint</strong><small>{activeProject.name}</small></span></button><div className="mobile-header-actions"><SaveStatus status={saveState} compact onRetry={() => setSaveRetryNonce((value) => value + 1)}/><button className="icon-button" onClick={() => setMobileMenu(true)} aria-label="Open menu"><Menu size={19}/></button></div></header>
 
     {mobileMenu && <div className="mobile-drawer-wrap" onMouseDown={() => setMobileMenu(false)}><aside className="mobile-drawer" onMouseDown={(event) => event.stopPropagation()}><div className="drawer-head"><strong>{activeProject.name}</strong><button className="icon-button" onClick={() => setMobileMenu(false)} aria-label="Close menu"><X size={18}/></button></div><div className="drawer-group-label">Core flow</div>{coreNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}<div className="drawer-group-label">More tools</div>{toolNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}</aside></div>}
 
     <main className="main-content">
       {view === 'home' && <HomeView project={activeProject} projects={projects} patterns={allPatterns} recommendations={recommendations} similarity={similarity} setView={navigate} updateProject={updateProject} create={() => setShowProjectCreate(true)} duplicate={duplicateProject} remove={deleteProject} addSnapshot={addSnapshot} restoreSnapshot={restoreSnapshot} exportBackup={exportBackup} importRef={importRef} importBackup={importBackup}/>} 
       {view === 'setup' && <SetupView project={activeProject} updateProject={updateProject} notify={notify} presets={configPresets} savePreset={saveConfigPreset} applyPreset={applyConfigPreset} deletePreset={deleteConfigPreset} setView={navigate}/>} 
+      {view === 'flows' && <CoreFlowsView project={activeProject} updateProject={updateProject} notify={notify}/>} 
+      {view === 'roadmap' && <RoadmapView project={activeProject} copy={copy} setView={navigate}/>} 
       {view === 'patterns' && <PatternsView patterns={allPatterns} selected={activeProject.selected} config={normalizedActiveConfig} compareIds={compareIds} search={search} setSearch={setSearch} category={category} setCategory={setCategory} level={level} setLevel={setLevel} setDetail={setDetail} toggle={togglePattern} toggleCompare={toggleCompare} compare={() => navigate('compare')} addCustom={() => setShowCustom(true)} learningMode={learningMode} setLearningMode={setLearningMode}/>} 
       {view === 'capabilities' && <CapabilitiesView capabilities={allCapabilities} selected={activeProject.capabilities} config={normalizedActiveConfig} search={capSearch} setSearch={setCapSearch} category={capCategory} setCategory={setCapCategory} level={capLevel} setLevel={setCapLevel} toggle={toggleCapability} addCustom={() => setShowCustomCapability(true)} removeCustom={removeCustomCapability}/>} 
       {view === 'docs' && <DocsView project={activeProject} selectedCapabilities={resolvedCapabilities} toggle={toggleDoc} updateProject={updateProject} copy={copy}/>} 
@@ -876,6 +1328,29 @@ function PageHeader({ eyebrow, title, copy, action }: { eyebrow: string; title: 
   return <header className="page-header"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{copy}</p></div>{action}</header>
 }
 
+function SaveStatus({ status, compact = false, onRetry }: { status: SaveState; compact?: boolean; onRetry?: () => void }) {
+  const icon = status.state === 'error'
+    ? <AlertTriangle size={compact ? 13 : 14}/>
+    : status.state === 'saving' || status.state === 'loading'
+      ? <LoaderCircle size={compact ? 13 : 14} className="spin"/>
+      : <Database size={compact ? 13 : 14}/>
+  const label = status.state === 'error'
+    ? 'Save problem'
+    : status.state === 'saving'
+      ? 'Saving…'
+      : status.state === 'loading'
+        ? 'Opening…'
+        : 'Saved locally'
+  const detail = status.state === 'saved' && status.savedAt
+    ? `Last saved ${new Date(status.savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    : status.message
+
+  return <div className={`save-state save-state-${status.state} ${compact ? 'compact' : ''}`} title={status.message}>
+    {icon}<div><strong>{label}</strong>{!compact && <small>{detail}</small>}</div>
+    {status.state === 'error' && onRetry && <button type="button" className="save-retry" onClick={onRetry} aria-label="Retry local save">{compact ? 'Retry' : 'Retry save'}</button>}
+  </div>
+}
+
 function SetupView({ project, updateProject, notify, presets, savePreset, applyPreset, deletePreset, setView }: {
   project: Project
   updateProject: (patch: Partial<Project> | ((project: Project) => Partial<Project>)) => void
@@ -889,8 +1364,12 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   const config = normalizeProjectConfig(project.config)
   const [search, setSearch] = useState('')
   const [configDepth, setConfigDepth] = useState<ConfigDepth>(() => {
-    const saved = window.localStorage.getItem('blueprint-setup-depth')
-    return saved === 'Standard' || saved === 'Advanced' ? saved : 'Quick'
+    try {
+      const saved = window.localStorage.getItem('blueprint-setup-depth')
+      return saved === 'Standard' || saved === 'Advanced' ? saved : 'Quick'
+    } catch {
+      return 'Quick'
+    }
   })
   const [customOnly, setCustomOnly] = useState(false)
   const [showAvailableScope, setShowAvailableScope] = useState(false)
@@ -898,11 +1377,13 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   const [openSections, setOpenSections] = useState<string[]>(['identity'])
   const [savingPreset, setSavingPreset] = useState(false)
   const [presetName, setPresetName] = useState('')
-  useEffect(() => { window.localStorage.setItem('blueprint-setup-depth', configDepth) }, [configDepth])
+  useEffect(() => {
+    try { window.localStorage.setItem('blueprint-setup-depth', configDepth) } catch { /* non-critical display preference */ }
+  }, [configDepth])
   useEffect(() => {
     if (config.profile !== 'Recommended' || config.operationalScale !== 'Auto') setShowRecommendationTuning(true)
   }, [config.profile, config.operationalScale])
-  const warnings = configWarnings(config)
+  const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
   const readiness = configReadiness(config)
   const typeMatches = appTypeMatches(config)
@@ -919,8 +1400,13 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
     let next = config
     for (const change of action.changes) {
       const setting = configSettings.find((item) => item.id === change.id)
-      if (setting?.kind === 'boolean' && isScopeSetting(change.id)) next = setScopeChoice(next, change.id, change.value === true ? 'On' : 'Off')
-      else next = setConfigValue(next, change.id, change.value)
+      if (setting && isScopeSetting(change.id)) {
+        if (setting.kind === 'boolean') next = setScopeChoice(next, change.id, change.value === true ? 'On' : 'Off')
+        else {
+          next = setScopeChoice(next, change.id, 'On')
+          next = setConfigValue(next, change.id, change.value)
+        }
+      } else next = setConfigValue(next, change.id, change.value)
     }
     setConfig(next)
     notify(action.title)
@@ -988,7 +1474,7 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
         </div>}
         <div className="setup-depth"><div className="setup-depth-heading"><span>How much detail do you want to review?</span><small>This changes presentation only. Search can still reach every setting.</small></div><div>{configDepths.map((depth) => <button key={depth.value} className={configDepth === depth.value ? 'active' : ''} onClick={() => setConfigDepth(depth.value)}><strong>{depth.label}</strong><small>{depth.description}</small></button>)}</div></div>
       </div>
-      <aside className="setup-status"><div className="setup-ready"><Gauge size={17}/><div><span>Blueprint readiness</span><strong>{readiness.score}% · {readiness.label}</strong><p>{readiness.coverage}% active-contract coverage. Auto-inactive features do not count as missing decisions.</p></div></div><div className="setup-stat-row"><div><strong>{visibleDecisionCount}</strong><span>available in {configDepth.toLowerCase()}</span></div><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{warnings.length + contextSignals.length}</strong><span>review signals</span></div></div></aside>
+      <aside className="setup-status"><div className="setup-ready"><Gauge size={17}/><div><span>Blueprint readiness</span><strong>{readiness.label}</strong><p>{readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''} · fix before implementation handoff.` : readiness.important ? `${readiness.important} important signal${readiness.important > 1 ? 's' : ''} · deliberate review required.` : readiness.review || readiness.advisory ? `${readiness.review + readiness.advisory} lower-severity review signal${readiness.review + readiness.advisory > 1 ? 's' : ''}.` : 'No App Setup review signals.'} <span>{readiness.score}% coherence indicator · {readiness.coverage}% contract coverage.</span></p></div></div><div className="setup-stat-row"><div><strong>{visibleDecisionCount}</strong><span>available in {configDepth.toLowerCase()}</span></div><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{reviewSignals.length + contextSignals.length}</strong><span>review signals</span></div></div></aside>
     </section>
 
     <ProjectContextPanel project={project} updateProject={updateProject}/>
@@ -997,9 +1483,9 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
 
     <section className="setup-intelligence" aria-label="Blueprint intelligence review">
       <div className="intelligence-card readiness-card">
-        <div className="intelligence-head"><div><Gauge size={15}/><span>Readiness</span></div><strong>{readiness.score}%</strong></div>
+        <div className="intelligence-head"><div><Gauge size={15}/><span>Readiness</span></div><strong>{readiness.label}</strong></div>
         <div className="readiness-dimensions">{readiness.dimensions.map((item) => <div key={item.label}><span>{item.label}</span><i><b style={{ width: `${item.score}%` }}/></i><small>{item.note}</small></div>)}</div>
-        <p>This is a coherence signal, not a checklist score. Recommended defaults are treated as complete decisions.</p>
+        <p>{readiness.score}% coherence indicator. Severity drives status; the percentage is secondary and is not a completion meter.</p>
       </div>
       {(config.appType === 'Custom / General' || alternateTypeMatches.length > 0) ? <div className="intelligence-card fit-card">
         <div className="intelligence-head"><div><Compass size={15}/><span>App-type fit</span></div><small>Only shown when useful</small></div>
@@ -1030,7 +1516,7 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
       {presets.length > 0 && <div className="preset-library">{presets.slice(0, 6).map((preset) => <span key={preset.id}><button onClick={() => applyPreset(preset)}>{preset.name}</button><button aria-label={`Delete ${preset.name}`} onClick={() => deletePreset(preset.id)}><X size={11}/></button></span>)}</div>}
     </section>
 
-    {warnings.length > 0 && <section className="setup-warnings"><CircleHelp size={18}/><div><strong>{warnings.length === 1 ? 'One review signal' : `${warnings.length} review signals`}</strong>{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div></section>}
+    {reviewSignals.length > 0 && <section className="setup-warnings typed-review-panel"><CircleHelp size={18}/><div><div className="typed-review-head"><strong>{reviewSignals.length === 1 ? 'One App Setup review signal' : `${reviewSignals.length} App Setup review signals`}</strong><div className="severity-summary">{readiness.blockers > 0 && <span className="severity-blocker">{readiness.blockers} blocker{readiness.blockers > 1 ? 's' : ''}</span>}{readiness.important > 0 && <span className="severity-important">{readiness.important} important</span>}{readiness.review > 0 && <span className="severity-review">{readiness.review} review</span>}{readiness.advisory > 0 && <span className="severity-advisory">{readiness.advisory} advisory</span>}</div></div><div className="typed-review-list">{reviewSignals.map((signal) => { const fix = signal.suggestedFixId ? quickFixes.find((item) => item.id === signal.suggestedFixId) : undefined; const firstSetting = signal.affectedSettings.map((id) => configSettings.find((item) => item.id === id)).find(Boolean); return <div className={`typed-review-row severity-${signal.severity}`} key={`${signal.id}-${signal.detail}`}><div><span className="review-meta"><b>{signal.severity}</b><i>{signal.category}</i></span><strong>{signal.title}</strong><p>{signal.detail}</p></div><div className="review-actions">{firstSetting && <button className="text-button" onClick={() => jumpToSection(firstSetting.section)}>Review setting <ArrowRight size={12}/></button>}{fix && <button onClick={() => applyAction(fix)}>Apply fix</button>}</div></div>})}</div></div></section>}
 
     <div className="setup-toolbar">
       <label className="search-box"><Search size={15}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find CSP, WCAG, backups, CI/CD, booking, webhook, AI, passkey, mobile…"/></label>
@@ -1086,8 +1572,9 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
                 const onOptions = options.filter((option) => !/^(off|none|disabled|no$|no\s|off\s\/|none\s\/)/i.test(option.value))
                 const selectedNote = options.find((option) => option.value === effectiveValue)?.note
                 const guidance = settingGuidance(setting, config)
+                const provenance = settingRecommendationProvenance(setting, config)
                 return <div className={`setup-setting ${customized ? 'customized' : ''} ${scope ? 'scope-setting' : ''}`} key={setting.id}>
-                  <div className="setup-setting-copy"><div><strong>{setting.label}</strong><span className={`guidance-badge guidance-${guidance.toLowerCase().replace(/\s+/g, '-')}`}>{guidance}</span>{normalizedQuery && <span className={`depth-badge depth-${settingDepth(setting).toLowerCase()}`}>{settingDepth(setting)}</span>}{customized && <span className="custom-badge">{deliberateScope ? 'Explicit scope' : 'Customized'}</span>}</div><p>{setting.description}</p>{scope ? <small className="scope-explanation"><b>{scope.choice === 'Auto' ? `Auto → ${scope.active ? 'On' : 'Off'}` : scope.choice}</b> · {scope.reason}</small> : <small>Recommended: {formatConfigValue(expected)}</small>}{setting.caution && customized && <em>{setting.caution}</em>}</div>
+                  <div className="setup-setting-copy"><div><strong>{setting.label}</strong><span className={`guidance-badge guidance-${guidance.toLowerCase().replace(/\s+/g, '-')}`}>{guidance}</span>{normalizedQuery && <span className={`depth-badge depth-${settingDepth(setting).toLowerCase()}`}>{settingDepth(setting)}</span>}{customized && <span className="custom-badge">{deliberateScope ? 'Explicit scope' : 'Customized'}</span>}</div><p>{setting.description}</p>{scope ? <small className="scope-explanation"><b>{scope.choice === 'Auto' ? `Auto → ${scope.active ? 'On' : 'Off'}` : scope.choice}</b> · {scope.reason}</small> : <small className="recommendation-why" title={`Recommended: ${formatConfigValue(expected)}`}><b>{provenance.source}</b> · {provenance.reason}</small>}{setting.caution && customized && <em>{setting.caution}</em>}</div>
                   <div className="setup-setting-control">
                     {scope ? <>
                       <div className="scope-control" aria-label={`${setting.label} scope`}>
@@ -1113,6 +1600,193 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
     {relevantSections.length === 0 && <div className="empty-panel setup-empty"><Search size={20}/><div><strong>{customOnly ? 'No customized settings match.' : 'No matching settings.'}</strong><p>{customOnly ? 'Turn off “Customized only” or change a setting first.' : 'Try a broader word. Search automatically includes Standard and Advanced settings regardless of your current depth.'}</p></div></div>}
 
     <div className="flow-next"><div><span>Next</span><strong>Shape the visual direction</strong><small>Your product scope is preserved. Visual Studio changes presentation, not feature scope.</small></div><button className="primary-button" onClick={() => setView('dna')}>Continue to Visual Studio <ArrowRight size={15}/></button></div>
+  </>
+}
+
+function CoreFlowsView({ project, updateProject, notify }: {
+  project: Project
+  updateProject: (patch: Partial<Project> | ((project: Project) => Partial<Project>)) => void
+  notify: (message: string) => void
+}) {
+  const config = normalizeProjectConfig(project.config)
+  const starters = suggestedCoreFlowTemplates(config).filter((template) => !project.coreFlows.some((flow) => flow.title.trim().toLowerCase() === template.title.toLowerCase()))
+  const completed = project.coreFlows.filter((flow) => coreFlowQuality(flow).complete).length
+
+  const addBlank = () => {
+    if (project.coreFlows.length >= 20) {
+      notify('Keep Core Flows focused — split secondary behavior into edge cases or documentation')
+      return
+    }
+    const flow = createCoreFlow()
+    updateProject((current) => ({ coreFlows: [...current.coreFlows, flow] }))
+    notify('Core flow added')
+  }
+
+  const addStarter = (template: ReturnType<typeof suggestedCoreFlowTemplates>[number]) => {
+    if (project.coreFlows.length >= 20) {
+      notify('Keep Core Flows focused — split secondary behavior into edge cases or documentation')
+      return
+    }
+    updateProject((current) => ({ coreFlows: [...current.coreFlows, coreFlowFromTemplate(template)] }))
+    notify(`${template.title} starter added — review it before treating it as project truth`)
+  }
+
+  const updateFlow = (id: string, patch: Partial<CoreFlow>) => updateProject((current) => ({
+    coreFlows: current.coreFlows.map((flow) => flow.id === id ? { ...flow, ...patch, updatedAt: now() } : flow),
+  }))
+
+  const removeFlow = (id: string) => {
+    updateProject((current) => ({ coreFlows: current.coreFlows.filter((flow) => flow.id !== id) }))
+    notify('Core flow removed')
+  }
+
+  const duplicateFlow = (flow: CoreFlow) => {
+    const copy = createCoreFlow({ ...flow, id: '', title: flow.title ? `${flow.title} — alternate` : 'Alternate flow', createdAt: '', updatedAt: '' })
+    updateProject((current) => ({ coreFlows: [...current.coreFlows, copy] }))
+    notify('Core flow duplicated')
+  }
+
+  const moveFlow = (id: string, direction: -1 | 1) => updateProject((current) => {
+    const index = current.coreFlows.findIndex((flow) => flow.id === id)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= current.coreFlows.length) return {}
+    const next = [...current.coreFlows]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    return { coreFlows: next }
+  })
+
+  const updateStep = (flow: CoreFlow, index: number, value: string) => {
+    const next = flow.steps.length ? [...flow.steps] : ['']
+    next[index] = value
+    updateFlow(flow.id, { steps: next })
+  }
+
+  const removeStep = (flow: CoreFlow, index: number) => updateFlow(flow.id, { steps: flow.steps.filter((_, stepIndex) => stepIndex !== index) })
+  const moveStep = (flow: CoreFlow, index: number, direction: -1 | 1) => {
+    const target = index + direction
+    if (target < 0 || target >= flow.steps.length) return
+    const next = [...flow.steps]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    updateFlow(flow.id, { steps: next })
+  }
+
+  const updateFailure = (flow: CoreFlow, index: number, value: string) => {
+    const next = [...flow.failureStates]
+    next[index] = value
+    updateFlow(flow.id, { failureStates: next })
+  }
+
+  return <>
+    <PageHeader
+      eyebrow="Power tool · workflow contract"
+      title="Describe the few journeys the product must get right."
+      copy="Core Flows capture actor → goal → main path → success → recovery. They are explicit workflow intent inside App Setup scope; adding or editing a flow never turns product scope on behind your back."
+      action={<button className="primary-button" onClick={addBlank}><Plus size={16}/> Add core flow</button>}
+    />
+
+    <section className="flow-contract-banner">
+      <div><ListChecks size={19}/><div><strong>{project.coreFlows.length ? `${completed}/${project.coreFlows.length} flows implementation-ready` : 'No core flows required to start'}</strong><p>Aim for the 2–5 journeys that define whether the product works. A good main path is usually 3–6 steps; secondary behavior belongs in failure/recovery states, acceptance criteria, or docs.</p></div></div>
+      <span>Flows never mutate App Setup</span>
+    </section>
+
+    {starters.length > 0 && <section className="flow-starters">
+      <div className="section-heading"><div><span className="eyebrow">Optional starters</span><h2>Use a relevant skeleton, then make it yours.</h2><p>These appear only because matching scope is already active. Nothing is added until you explicitly choose a starter.</p></div></div>
+      <div className="flow-starter-grid">{starters.slice(0, 6).map((template) => <article key={template.templateId}>
+        <div><span>Starter</span><h3>{template.title}</h3><p>{template.description}</p></div>
+        <button className="text-button" onClick={() => addStarter(template)}>Add starter <Plus size={14}/></button>
+      </article>)}</div>
+    </section>}
+
+    {project.coreFlows.length === 0 ? <section className="flow-empty-state">
+      <div className="empty-icon"><ListChecks size={22}/></div>
+      <h2>Core Flows are optional—but powerful for workflow-heavy apps.</h2>
+      <p>App Setup already defines product scope and engineering behavior. Add a flow only when an implementation agent benefits from knowing the exact human journey, sequence, success state, or recovery behavior.</p>
+      <button className="primary-button" onClick={addBlank}><Plus size={16}/> Define the first flow</button>
+    </section> : <section className="core-flow-list">{project.coreFlows.map((flow, flowIndex) => {
+      const quality = coreFlowQuality(flow)
+      const stepRows = flow.steps.length ? flow.steps : ['']
+      return <article className="core-flow-card" key={flow.id}>
+        <div className="core-flow-head">
+          <div className="flow-index">{String(flowIndex + 1).padStart(2, '0')}</div>
+          <label className="flow-title-field"><span>Flow name</span><input value={flow.title} onChange={(event) => updateFlow(flow.id, { title: event.target.value })} placeholder="e.g. Customer booking"/></label>
+          <div className={`flow-quality ${quality.complete ? 'complete' : ''}`}><strong>{quality.complete ? 'Ready' : `${quality.score}%`}</strong><span>{quality.complete ? 'Complete contract' : `Missing ${quality.missing.length}`}</span></div>
+          <div className="flow-card-actions">
+            <button className="icon-button" onClick={() => moveFlow(flow.id, -1)} disabled={flowIndex === 0} aria-label="Move flow up"><ArrowUp size={15}/></button>
+            <button className="icon-button" onClick={() => moveFlow(flow.id, 1)} disabled={flowIndex === project.coreFlows.length - 1} aria-label="Move flow down"><ArrowDown size={15}/></button>
+            <button className="icon-button" onClick={() => duplicateFlow(flow)} aria-label="Duplicate flow"><Copy size={15}/></button>
+            <button className="icon-button danger" onClick={() => removeFlow(flow.id)} aria-label="Delete flow"><Trash2 size={15}/></button>
+          </div>
+        </div>
+
+        <div className="flow-fields-grid">
+          <label><span>Actor</span><input value={flow.actor} onChange={(event) => updateFlow(flow.id, { actor: event.target.value })} placeholder="Customer, staff, admin…"/></label>
+          <label><span>Goal</span><input value={flow.goal} onChange={(event) => updateFlow(flow.id, { goal: event.target.value })} placeholder="What is this actor trying to accomplish?"/></label>
+          <label><span>Starting point</span><input value={flow.startingPoint} onChange={(event) => updateFlow(flow.id, { startingPoint: event.target.value })} placeholder="Where or when does the journey begin?"/></label>
+          <label><span>Success state</span><input value={flow.successState} onChange={(event) => updateFlow(flow.id, { successState: event.target.value })} placeholder="What must be durably true when this succeeds?"/></label>
+        </div>
+
+        <div className="flow-editor-section">
+          <div className="flow-editor-heading"><div><strong>Main path</strong><span>Keep this to the essential sequence. 3–6 steps is a good default.</span></div><button className="text-button" onClick={() => updateFlow(flow.id, { steps: [...flow.steps, ''] })} disabled={flow.steps.length >= 10}><Plus size={13}/> Add step</button></div>
+          <div className="flow-step-list">{stepRows.map((step, stepIndex) => <div className="flow-step-row" key={`${flow.id}-step-${stepIndex}`}>
+            <b>{stepIndex + 1}</b><input value={step} onChange={(event) => updateStep(flow, stepIndex, event.target.value)} placeholder={stepIndex === 0 ? 'First meaningful action…' : 'Next action or system response…'}/>
+            <button className="icon-button" onClick={() => moveStep(flow, stepIndex, -1)} disabled={!flow.steps.length || stepIndex === 0} aria-label="Move step up"><ArrowUp size={13}/></button>
+            <button className="icon-button" onClick={() => moveStep(flow, stepIndex, 1)} disabled={!flow.steps.length || stepIndex === flow.steps.length - 1} aria-label="Move step down"><ArrowDown size={13}/></button>
+            <button className="icon-button" onClick={() => removeStep(flow, stepIndex)} disabled={!flow.steps.length} aria-label="Remove step"><X size={13}/></button>
+          </div>)}</div>
+        </div>
+
+        <div className="flow-editor-section">
+          <div className="flow-editor-heading"><div><strong>Failure / recovery states</strong><span>Capture important unhappy paths without bloating the main journey.</span></div><button className="text-button" onClick={() => updateFlow(flow.id, { failureStates: [...flow.failureStates, ''] })}><Plus size={13}/> Add recovery state</button></div>
+          {flow.failureStates.length ? <div className="flow-failure-list">{flow.failureStates.map((state, index) => <div key={`${flow.id}-failure-${index}`}><AlertTriangle size={14}/><input value={state} onChange={(event) => updateFailure(flow, index, event.target.value)} placeholder="What fails → what should the product do next?"/><button className="icon-button" onClick={() => updateFlow(flow.id, { failureStates: flow.failureStates.filter((_, itemIndex) => itemIndex !== index) })} aria-label="Remove recovery state"><X size={13}/></button></div>)}</div> : <p className="flow-empty-copy">No recovery state captured yet. That's fine for a purely informational flow; transactional or state-changing flows usually deserve at least one.</p>}
+        </div>
+
+        <label className="flow-notes"><span>Implementation note <small>optional</small></span><textarea rows={2} value={flow.notes} onChange={(event) => updateFlow(flow.id, { notes: event.target.value })} placeholder="One constraint the implementation agent should not miss…"/></label>
+
+        {!quality.complete && <div className="flow-quality-note"><CircleHelp size={15}/><div><strong>Complete this flow:</strong><span>{quality.missing.join(' · ')}</span>{quality.guidance.slice(0, 1).map((item) => <small key={item}>{item}</small>)}</div></div>}
+        {quality.complete && quality.guidance.length > 0 && <div className="flow-quality-note subtle"><Lightbulb size={15}/><div><strong>Optional refinement</strong><span>{quality.guidance[0]}</span></div></div>}
+      </article>
+    })}</section>}
+  </>
+}
+
+function RoadmapView({ project, copy, setView }: { project: Project; copy: (value: string, message?: string) => void; setView: (view: View) => void }) {
+  const config = normalizeProjectConfig(project.config)
+  const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
+  const phaseNames = new Map(roadmap.phases.map((phase) => [phase.id, phase.title]))
+  const blockers = roadmap.phases.filter((phase) => phase.blocking).length
+
+  return <>
+    <PageHeader
+      eyebrow="Power tool · derived delivery plan"
+      title="Build in the order the product actually depends on."
+      copy="Blueprint derives this implementation roadmap from resolved App Setup and your authored Core Flows. There is nothing new to configure here: when scope or flows change, the roadmap changes with them."
+      action={<button className="primary-button" onClick={() => copy(implementationRoadmapMarkdown(roadmap, 2), 'Implementation roadmap copied')}><Copy size={16}/> Copy roadmap</button>}
+    />
+
+    <section className="roadmap-summary">
+      <div><ArrowRight size={20}/><div><strong>{roadmap.phases.length} derived implementation phases</strong><p>{roadmap.summary}</p></div></div>
+      <div className="roadmap-summary-stats"><span><b>{project.coreFlows.length}</b> authored flows</span><span className={roadmap.incompleteFlowCount ? 'attention' : ''}><b>{roadmap.incompleteFlowCount}</b> incomplete flows</span><span className={blockers ? 'attention' : ''}><b>{blockers}</b> blocking gates</span></div>
+    </section>
+
+    <section className="roadmap-principles">
+      <div className="section-heading"><div><span className="eyebrow">Roadmap contract</span><h2>Sequence is guidance. Scope is not negotiable.</h2><p>The roadmap can explain what should happen first, but it cannot authorize anything App Setup says is inactive.</p></div></div>
+      <div>{roadmap.principles.map((principle) => <p key={principle}><Check size={14}/>{principle}</p>)}</div>
+    </section>
+
+    <section className="implementation-roadmap-list">{roadmap.phases.map((phase, index) => <article key={phase.id} className={`implementation-roadmap-phase ${phase.blocking ? 'blocking' : ''}`}>
+      <div className="roadmap-phase-rail"><span>{String(index + 1).padStart(2, '0')}</span>{index < roadmap.phases.length - 1 && <i/>}</div>
+      <div className="roadmap-phase-body">
+        <header><div><span className="roadmap-kind">{phase.kind}{phase.blocking ? ' · blocking gate' : ''}</span><h2>{phase.title}</h2><p>{phase.objective}</p></div>{phase.blocking && <AlertTriangle size={19}/>}</header>
+        {phase.dependsOn.length > 0 && <div className="roadmap-dependencies"><strong>Depends on</strong>{phase.dependsOn.map((id) => <span key={id}>{phaseNames.get(id) ?? id}</span>)}</div>}
+        <div className="roadmap-phase-grid">
+          <div><strong>Deliverables</strong>{phase.deliverables.map((item) => <p key={item}><ArrowRight size={13}/>{item}</p>)}</div>
+          <div><strong>Proof before advancing</strong>{phase.proof.map((item) => <p key={item}><Check size={13}/>{item}</p>)}</div>
+        </div>
+        <div className="roadmap-sources"><span>Derived from</span>{phase.sources.map((source) => <em key={source}>{source}</em>)}</div>
+      </div>
+    </article>)}</section>
+
+    <div className="flow-next"><div><span>Next</span><strong>Implementation brief</strong><small>The generated spec and AI prompt now carry this exact roadmap alongside the scope, flows, proof criteria, and edge cases.</small></div><button className="primary-button" onClick={() => setView('spec')}>Review generated spec <ArrowRight size={15}/></button></div>
   </>
 }
 
@@ -1148,8 +1822,9 @@ function snapshotComparison(project: Project, snapshot: Snapshot) {
     + (JSON.stringify(snapshotDna.darkPalette) === JSON.stringify(currentDna.darkPalette) ? 0 : 1)
     + (JSON.stringify(snapshotDna.visualAntiPatterns) === JSON.stringify(currentDna.visualAntiPatterns) ? 0 : 1)
   const contextChanges = JSON.stringify(normalizeProjectContext(snapshot.context)) === JSON.stringify(normalizeProjectContext(project.context)) ? 0 : 1
-  const total = configChanges + addedPatterns + removedPatterns + capabilityChanges + docChanges + dnaChanges + contextChanges
-  return { total, configChanges, addedPatterns, removedPatterns, capabilityChanges, docChanges, dnaChanges, contextChanges }
+  const flowChanges = JSON.stringify(normalizeCoreFlows(snapshot.coreFlows)) === JSON.stringify(normalizeCoreFlows(project.coreFlows)) ? 0 : 1
+  const total = configChanges + addedPatterns + removedPatterns + capabilityChanges + docChanges + dnaChanges + contextChanges + flowChanges
+  return { total, configChanges, addedPatterns, removedPatterns, capabilityChanges, docChanges, dnaChanges, contextChanges, flowChanges }
 }
 
 function HomeView({ project, projects, recommendations, similarity, setView, updateProject, create, duplicate, remove, addSnapshot, restoreSnapshot, exportBackup, importRef, importBackup }: {
@@ -1196,12 +1871,12 @@ function HomeView({ project, projects, recommendations, similarity, setView, upd
     </section>
 
     <section className="workspace-stats workspace-stats-six">
-      <button onClick={() => setView('setup')}><span>App setup</span><strong>{readiness.score}%</strong><small>{project.config.appType} · {project.config.overrides.length + Object.keys(project.config.scopeChoices ?? {}).length} deliberate choices</small></button>
+      <button onClick={() => setView('setup')}><span>App setup</span><strong>{readiness.label}</strong><small>{readiness.score}% coherence · {project.config.overrides.length + Object.keys(project.config.scopeChoices ?? {}).length} deliberate choices</small></button>
       <button onClick={() => setView('patterns')}><span>Visual patterns</span><strong>{project.selected.length}</strong><small>How it looks and behaves</small></button>
       <button onClick={() => setView('capabilities')}><span>Capabilities</span><strong>{project.capabilities.length}</strong><small>Reusable engineering concepts</small></button>
       <button onClick={() => setView('docs')}><span>MVP docs</span><strong>{project.docs.length}</strong><small>Knowledge that ships with code</small></button>
       <button onClick={() => setView('references')}><span>References</span><strong>{project.references.length}</strong><small>Specific ideas, not clones</small></button>
-      <button onClick={() => setView('spec')}><span>Generated spec</span><strong>{readiness.label === 'Ready' ? 'Ready' : 'Review'}</strong><small>Implementation brief + exports</small></button>
+      <button onClick={() => setView('spec')}><span>Generated spec</span><strong>{readiness.label}</strong><small>Implementation brief + typed review intelligence</small></button>
     </section>
 
     <section className="section-block">
@@ -1211,10 +1886,10 @@ function HomeView({ project, projects, recommendations, similarity, setView, upd
 
     <section className="section-block history-block">
       <div className="section-heading"><div><div className="eyebrow"><History size={13}/> Blueprint checkpoints</div><h2>Compare decisions before you restore them.</h2></div><button className="secondary-button" onClick={addSnapshot}><Save size={15}/> Save checkpoint</button></div>
-      {project.snapshots.length ? <><div className="checkpoint-list checkpoint-list-rich">{project.snapshots.slice(0, 8).map((snapshot) => { const diff = snapshotComparison(project, snapshot); return <div key={snapshot.id}><div><strong>{snapshot.label}</strong><span>{new Date(snapshot.createdAt).toLocaleString()}</span></div><small>{snapshot.config ? `${snapshot.config.overrides.length + Object.keys(snapshot.config.scopeChoices ?? {}).length} setup decisions` : 'Legacy checkpoint'} · {snapshot.selected.length} patterns · {diff.total === 0 ? 'matches current' : `${diff.total} changes from current`}</small><div className="checkpoint-actions"><button onClick={() => setCompareCheckpointId((current) => current === snapshot.id ? '' : snapshot.id)}>{compareCheckpointId === snapshot.id ? 'Hide diff' : 'Compare'}</button><button onClick={() => restoreSnapshot(snapshot)}>Restore</button></div></div> })}</div>{compareCheckpoint && checkpointDiff && <div className="checkpoint-diff"><div><span>Comparing current with</span><strong>{compareCheckpoint.label}</strong></div><div><b>{checkpointDiff.configChanges}</b><span>setup decisions</span></div><div><b>{checkpointDiff.addedPatterns + checkpointDiff.removedPatterns}</b><span>pattern changes</span></div><div><b>{checkpointDiff.capabilityChanges}</b><span>capabilities</span></div><div><b>{checkpointDiff.docChanges}</b><span>docs</span></div><div><b>{checkpointDiff.dnaChanges}</b><span>Visual Studio</span></div><div><b>{checkpointDiff.contextChanges}</b><span>project context</span></div></div>}</> : <div className="empty-panel"><Save size={20}/><div><strong>No checkpoints yet.</strong><p>Save one before a meaningful product or visual change. New checkpoints capture setup, capabilities, docs, references, patterns, and Visual Studio together.</p></div></div>}
+      {project.snapshots.length ? <><div className="checkpoint-list checkpoint-list-rich">{project.snapshots.slice(0, 8).map((snapshot) => { const diff = snapshotComparison(project, snapshot); return <div key={snapshot.id}><div><strong>{snapshot.label}</strong><span>{new Date(snapshot.createdAt).toLocaleString()}</span></div><small>{snapshot.config ? `${snapshot.config.overrides.length + Object.keys(snapshot.config.scopeChoices ?? {}).length} setup decisions` : 'Legacy checkpoint'} · {snapshot.selected.length} patterns · {diff.total === 0 ? 'matches current' : `${diff.total} changes from current`}</small><div className="checkpoint-actions"><button onClick={() => setCompareCheckpointId((current) => current === snapshot.id ? '' : snapshot.id)}>{compareCheckpointId === snapshot.id ? 'Hide diff' : 'Compare'}</button><button onClick={() => restoreSnapshot(snapshot)}>Restore</button></div></div> })}</div>{compareCheckpoint && checkpointDiff && <div className="checkpoint-diff"><div><span>Comparing current with</span><strong>{compareCheckpoint.label}</strong></div><div><b>{checkpointDiff.configChanges}</b><span>setup decisions</span></div><div><b>{checkpointDiff.addedPatterns + checkpointDiff.removedPatterns}</b><span>pattern changes</span></div><div><b>{checkpointDiff.capabilityChanges}</b><span>capabilities</span></div><div><b>{checkpointDiff.docChanges}</b><span>docs</span></div><div><b>{checkpointDiff.dnaChanges}</b><span>Visual Studio</span></div><div><b>{checkpointDiff.contextChanges}</b><span>project context</span></div><div><b>{checkpointDiff.flowChanges}</b><span>core flows</span></div></div>}</> : <div className="empty-panel"><Save size={20}/><div><strong>No checkpoints yet.</strong><p>Save one before a meaningful product or visual change. New checkpoints capture setup, core flows, capabilities, docs, references, patterns, and Visual Studio together.</p></div></div>}
     </section>
 
-    <section className="backup-strip"><div><div className="eyebrow"><FileJson size={13}/> Portability</div><strong>Your design knowledge should not be trapped in one browser.</strong><p>Export all projects, app setup, capabilities, references, checkpoints, docs selections, and custom discoveries as a portable backup.</p></div><div><button className="secondary-button" onClick={exportBackup}><Download size={15}/> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={15}/> Import</button><input ref={importRef} hidden type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importBackup(file) }}/><button className="danger-link" onClick={remove}><Trash2 size={14}/> Remove workspace</button></div></section>
+    <section className="backup-strip"><div><div className="eyebrow"><FileJson size={13}/> Portability + recovery</div><strong>Your design knowledge should not be trapped in one browser.</strong><p>Workspaces now save to IndexedDB with a last-known-good recovery copy, while reference images live as separate Blob assets. Export remains the portable safety net and includes every referenced image.</p></div><div><button className="secondary-button" onClick={exportBackup}><Download size={15}/> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={15}/> Import</button><input ref={importRef} hidden type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importBackup(file) }}/><button className="danger-link" onClick={remove}><Trash2 size={14}/> Remove workspace</button></div></section>
   </>
 }
 
@@ -1333,11 +2008,50 @@ function CompareView({ ids, patterns: allPatterns, selected, toggle, removeCompa
 
 function CompareFact({ label, value }: { label: string; value: string }) { return <div className="compare-fact"><span>{label}</span><p>{value}</p></div> }
 
+function ReferenceVisual({ reference }: { reference: ReferenceItem }) {
+  const [src, setSrc] = useState(reference.imageData ?? '')
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    if (!reference.imageAssetId) {
+      setSrc(reference.imageData ?? '')
+      setFailed(false)
+      return
+    }
+
+    let objectUrl = ''
+    let cancelled = false
+    setFailed(false)
+    setSrc('')
+    void getAssetBlob(reference.imageAssetId)
+      .then((blob) => {
+        if (cancelled) return
+        if (!blob) {
+          setFailed(true)
+          return
+        }
+        objectUrl = URL.createObjectURL(blob)
+        setSrc(objectUrl)
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true)
+      })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [reference.imageAssetId, reference.imageData])
+
+  if (src) return <div className="reference-image"><img src={src} alt=""/></div>
+  return <div className="reference-image placeholder"><ImageIcon size={26}/><span>{failed ? 'Image unavailable' : reference.imageAssetId ? 'Loading image…' : 'Link / note reference'}</span></div>
+}
+
 function ReferencesView({ project, add, remove }: { project: Project; add: () => void; remove: (id: string) => void }) {
   return <>
     <PageHeader eyebrow="Reference board" title="Save the exact thing you like—not an entire design to imitate." copy="Add screenshots, links, and a note about what should influence the project. This keeps references directional: typography from one site, navigation from another, motion from somewhere else." action={<button className="primary-button" onClick={add}><Plus size={16}/> Add reference</button>}/>
     <div className="reference-rule"><Lightbulb size={18}/><div><strong>Good reference note</strong><p>“I like the centered dock and active-state treatment. Do not copy the color palette or page composition.”</p></div></div>
-    {project.references.length ? <div className="reference-grid">{project.references.map((reference) => <article className="reference-card" key={reference.id}>{reference.imageData ? <div className="reference-image"><img src={reference.imageData} alt=""/></div> : <div className="reference-image placeholder"><ImageIcon size={26}/><span>Link / note reference</span></div>}<div className="reference-body"><div className="reference-head"><div><span>{reference.focus.join(' · ') || 'General direction'}</span><h3>{reference.title}</h3></div><button className="icon-button" onClick={() => remove(reference.id)} aria-label="Remove reference"><Trash2 size={15}/></button></div><p>{reference.note || 'No note yet. Add a precise note next time you refine this reference.'}</p><div className="reference-foot">{reference.url ? <a href={reference.url} target="_blank" rel="noreferrer"><LinkIcon size={13}/> Open source <ExternalLink size={12}/></a> : <span><ImageIcon size={13}/> Screenshot reference</span>}<small>{new Date(reference.createdAt).toLocaleDateString()}</small></div></div></article>)}</div> : <div className="reference-empty"><ImageIcon size={32}/><h2>Your board is intentionally empty.</h2><p>Start with one screenshot or URL and label exactly what you want to borrow as a principle.</p><button className="primary-button" onClick={add}>Add first reference</button></div>}
+    {project.references.length ? <div className="reference-grid">{project.references.map((reference) => <article className="reference-card" key={reference.id}><ReferenceVisual reference={reference}/><div className="reference-body"><div className="reference-head"><div><span>{reference.focus.join(' · ') || 'General direction'}</span><h3>{reference.title}</h3></div><button className="icon-button" onClick={() => remove(reference.id)} aria-label="Remove reference"><Trash2 size={15}/></button></div><p>{reference.note || 'No note yet. Add a precise note next time you refine this reference.'}</p><div className="reference-foot">{reference.url ? <a href={reference.url} target="_blank" rel="noreferrer"><LinkIcon size={13}/> Open source <ExternalLink size={12}/></a> : <span><ImageIcon size={13}/> Screenshot reference</span>}<small>{new Date(reference.createdAt).toLocaleDateString()}</small></div></div></article>)}</div> : <div className="reference-empty"><ImageIcon size={32}/><h2>Your board is intentionally empty.</h2><p>Start with one screenshot or URL and label exactly what you want to borrow as a principle.</p><button className="primary-button" onClick={add}>Add first reference</button></div>}
   </>
 }
 
@@ -1357,43 +2071,48 @@ function SpecView({ project, selectedPatterns, selectedCapabilities, similarity,
   const selectedDocs = projectDocs.filter((doc) => project.docs.includes(doc.id))
   const config = normalizeProjectConfig(project.config)
   const readiness = configReadiness(config)
-  const criteria = acceptanceCriteria(config)
-  const cases = edgeCases(config)
-  const warnings = configWarnings(config)
+  const criteria = [...acceptanceCriteria(config), ...coreFlowAcceptanceCriteria(project.coreFlows)]
+  const cases = [...edgeCases(config), ...coreFlowFailureCases(project.coreFlows)]
+  const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
+  const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
   const visualSignals = visualReviewSignals(project.dna)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
   const resolvedPatterns = activePatterns(selectedPatterns, config)
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
   const contextEntries = projectContextEntries(project.context)
-  const reviewCount = warnings.length + contextSignals.length + visualSignals.length + layerSignals.length
+  const reviewCount = reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length
+  const { snapshots: _localCheckpoints, references: _localReferences, ...projectContract } = project
+  const referenceContract = project.references.map(({ imageData: _imageData, imageAssetId: _imageAssetId, ...reference }) => reference)
   const jsonSpec = JSON.stringify({
-    version: 10,
-    blueprintVersion: '0.18.0',
-    intelligence: { readiness, reviewSignals: warnings, projectContextReviewSignals: contextSignals, visualReviewSignals: visualSignals, crossLayerSignals: layerSignals, acceptanceCriteria: criteria, edgeCases: cases, appTypeMatches: appTypeMatches(config) },
-    project: { ...project, config, selected: resolvedPatterns.map((pattern) => pattern.id), capabilities: resolvedCapabilities.map((capability) => capability.id), references: project.references.map(({ imageData: _imageData, ...reference }) => reference) },
+    version: 12,
+    blueprintVersion: '0.24.0',
+    intelligence: { readiness, reviewSignals, implementationRoadmap: roadmap, recommendationProvenance: configSettings.filter((setting) => settingIncludedInContract(setting, config)).map((setting) => ({ id: setting.id, label: setting.label, ...settingRecommendationProvenance(setting, config) })), projectContextReviewSignals: contextSignals, visualReviewSignals: visualSignals, crossLayerSignals: layerSignals, acceptanceCriteria: criteria, edgeCases: cases, appTypeMatches: appTypeMatches(config) },
+    project: { ...projectContract, config, selected: resolvedPatterns.map((pattern) => pattern.id), capabilities: resolvedCapabilities.map((capability) => capability.id), references: referenceContract },
     selectedPatterns: resolvedPatterns,
     selectedCapabilities: resolvedCapabilities,
     excludedSelections: { patterns: selectedPatterns.filter((pattern) => !patternApplicability(pattern, config).compatible).map((pattern) => ({ id: pattern.id, name: pattern.name, reason: patternApplicability(pattern, config).reason })), capabilities: selectedCapabilities.filter((capability) => !capabilityApplicability(capability, config).compatible).map((capability) => ({ id: capability.id, name: capability.name, reason: capabilityApplicability(capability, config).reason })) },
     selectedDocs: selectedDocs.map((doc) => ({ id: doc.id, filename: doc.filename, title: doc.title })),
   }, null, 2)
   return <>
-    <PageHeader eyebrow="Generated blueprint" title="One implementation brief, with proof of what ‘done’ means." copy="The human-facing summary stays compact. Exports still carry the full active setup contract, plus readiness signals, acceptance criteria, edge cases, visual direction, capabilities, docs, and references." action={<button className="primary-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}><Copy size={16}/> Copy AI prompt</button>}/>
+    <PageHeader eyebrow="Generated blueprint" title="One implementation brief, with proof of what ‘done’ means." copy="The human-facing summary stays compact. Exports still carry the full active setup contract, plus typed readiness signals, acceptance criteria, edge cases, the derived implementation roadmap, user-authored core flows, visual direction, capabilities, docs, and references." action={<button className="primary-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}><Copy size={16}/> Copy AI prompt</button>}/>
     <div className="spec-toolbar"><button onClick={() => downloadText(`${slugify(project.name)}-project-spec.md`, markdown, 'text/markdown')}><FileText size={15}/> Project spec</button><button onClick={() => downloadText(`${slugify(project.name)}-docs-manifest.md`, docsManifest, 'text/markdown')}><FileText size={15}/> Docs manifest</button><button onClick={() => downloadText(`${slugify(project.name)}-blueprint.json`, jsonSpec, 'application/json')}><FileJson size={15}/> JSON</button><button onClick={addSnapshot}><Save size={15}/> Save checkpoint</button></div>
     <div className="spec-layout"><section className="spec-sheet"><label className="spec-project"><span>Project name</span><input value={project.name} onChange={(event) => updateProject({ name: event.target.value })}/></label>
       <div className="spec-section"><span className="spec-number">01</span><div><div className="eyebrow">App setup</div><h2>{config.appType}</h2><div className="spec-facts"><span>{config.profile} profile</span><span>{resolvedOperationalScale(config)} scale</span><span>{config.overrides.length + Object.keys(config.scopeChoices).length} deliberate choices</span><span>{configSettings.filter((setting) => settingIncludedInContract(setting, config)).length} active decisions</span></div>{(config.overrides.length || Object.keys(config.scopeChoices).length) ? <div className="spec-config-overrides">{Object.entries(config.scopeChoices).slice(0, 6).map(([id, choice]) => { const setting = configSettings.find((item) => item.id === id); return setting ? <div key={`scope-${id}`}><span>{setting.label}</span><strong>{choice}</strong></div> : null })}{config.overrides.slice(0, 12).map((id) => { const setting = configSettings.find((item) => item.id === id); return setting && settingIncludedInContract(setting, config) ? <div key={id}><span>{setting.label}</span><strong>{formatConfigValue(effectiveConfigValue(config, id))}</strong></div> : null })}</div> : <p className="spec-muted">Using Auto scope resolution with contextual behavioral and quality defaults.</p>}<button className="text-button" onClick={() => setView('setup')}>Review app setup <ArrowUpRight size={14}/></button></div></div>
-      <div className="spec-section"><span className="spec-number">02</span><div><div className="eyebrow">Readiness & proof</div><div className="spec-readiness"><div><strong>{readiness.score}%</strong><span>{readiness.label}</span><small>{reviewCount ? `${reviewCount} review signal${reviewCount > 1 ? 's' : ''}` : 'No review signals'}</small></div><div className="spec-proof-list"><strong>Acceptance criteria</strong>{criteria.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div><div className="spec-proof-list"><strong>Edge cases</strong>{cases.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div></div>{(warnings.length > 0 || contextSignals.length > 0 || visualSignals.length > 0) && <div className="spec-review-signals">{warnings.slice(0, 4).map((warning) => <p key={warning}>{warning}</p>)}{contextSignals.slice(0, 3).map((signal) => <p key={signal.id}><strong>Advisory:</strong> {signal.detail}</p>)}{visualSignals.slice(0, 4).map((signal) => <p key={signal}><strong>Visual:</strong> {signal}</p>)}</div>}</div></div>
+      <div className="spec-section"><span className="spec-number">02</span><div><div className="eyebrow">Readiness & proof</div><div className="spec-readiness"><div><strong>{readiness.label}</strong><span>{readiness.score}% coherence indicator</span><small>{readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''}` : readiness.important ? `${readiness.important} important` : reviewCount ? `${reviewCount} review signal${reviewCount > 1 ? 's' : ''}` : 'No review signals'}</small></div><div className="spec-proof-list"><strong>Acceptance criteria</strong>{criteria.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div><div className="spec-proof-list"><strong>Edge cases</strong>{cases.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div></div>{(reviewSignals.length > 0 || contextSignals.length > 0 || visualSignals.length > 0) && <div className="spec-review-signals">{reviewSignals.slice(0, 4).map((signal) => <p key={`${signal.id}-${signal.detail}`}><strong>{signal.severity.toUpperCase()} · {signal.category}</strong> — {signal.title}: {signal.detail}</p>)}{contextSignals.slice(0, 3).map((signal) => <p key={signal.id}><strong>Advisory:</strong> {signal.detail}</p>)}{visualSignals.slice(0, 4).map((signal) => <p key={signal}><strong>Visual:</strong> {signal}</p>)}</div>}</div></div>
       <div className="spec-section"><span className="spec-number">03</span><div><div className="eyebrow">Project context · optional</div>{contextEntries.length ? <div className="spec-context-list">{contextEntries.map((entry) => <div key={entry.id}><span>{entry.label}</span><p>{entry.value}</p></div>)}</div> : <p className="spec-muted">No optional human briefing supplied. Structured Blueprint scope remains sufficient.</p>}<small className="spec-muted">Verbatim guidance only — this never changes App Setup automatically.</small></div></div>
-      <div className="spec-section"><span className="spec-number">04</span><div><div className="eyebrow">Product direction</div><h2>{project.dna.personality}</h2><div className="spec-facts"><span>{project.dna.mobileFirst ? 'Mobile-first' : 'Responsive'}</span><span>{project.dna.easePriority} usability</span><span>{project.dna.stretch} creative stretch</span><span>{project.dna.typography}</span></div></div></div>
-      <div className="spec-section"><span className="spec-number">05</span><div><div className="eyebrow">Capabilities</div>{resolvedCapabilities.length ? <div className="spec-capability-list">{resolvedCapabilities.map((cap) => <span key={cap.id}>{cap.name}</span>)}</div> : <div className="spec-empty"><p>No compatible capabilities in resolved App Setup.</p><button className="text-button" onClick={() => setView('capabilities')}>Review product capabilities <ArrowUpRight size={14}/></button></div>}</div></div>
-      <div className="spec-section"><span className="spec-number">06</span><div><div className="eyebrow">Visual Studio</div><div className="spec-facts"><span>{project.dna.themeMode}</span><span>{project.dna.typographyCharacter}</span><span>{project.dna.sectionStrategy}</span><span>{project.dna.surfaceLanguage}</span><span>{project.dna.motionAmount} · {project.dna.motionCharacter}</span></div><div className="visual-dna-summary"><Metric name="Density" value={project.dna.density}/><Metric name="Icons" value={project.dna.iconWeight}/><Metric name="Surfaces" value={project.dna.cardWeight}/><Metric name="Corners" value={project.dna.radius}/><Metric name="Motion" value={project.dna.motion}/></div><div className="spec-colors">{Object.entries(project.dna.palette).slice(0, 8).map(([role, color]) => <span key={role} style={{ background: color }} title={`${role}: ${color}`}/>)}</div>{project.dna.visualAntiPatterns.length > 0 && <p className="spec-muted">Avoid: {project.dna.visualAntiPatterns.join(', ')}</p>}</div></div>
-      <div className="spec-section"><span className="spec-number">07</span><div className="spec-patterns"><div className="eyebrow">Selected visual patterns</div>{resolvedPatterns.length === 0 ? <div className="spec-empty"><p>No compatible visual patterns in resolved App Setup.</p><button className="text-button" onClick={() => setView('patterns')}>Review visual patterns <ArrowUpRight size={14}/></button></div> : resolvedPatterns.map((pattern) => <article key={pattern.id}><div><span>{pattern.category}</span><h3>{pattern.name}</h3></div><button onClick={() => copy(pattern.prompt, `${pattern.name} prompt copied`)}><Copy size={14}/></button><p>{pattern.prompt}</p></article>)}</div></div>
-      {layerSignals.length > 0 && <div className="spec-section"><span className="spec-number">08</span><div><div className="eyebrow">Cross-layer review</div><p className="spec-muted">Saved choices below are preserved but excluded from generated implementation direction because App Setup currently says they do not apply.</p><div className="spec-review-signals">{layerSignals.map((signal) => <p key={signal}>{signal}</p>)}</div></div></div>}
-      <div className="spec-section"><span className="spec-number">09</span><div><div className="eyebrow">MVP project docs</div><div className="spec-doc-list">{selectedDocs.length ? selectedDocs.map((doc) => <code key={doc.id}>{doc.filename}</code>) : <p className="spec-muted">No documentation files selected.</p>}</div><button className="text-button" onClick={() => setView('docs')}>Edit documentation checklist <ArrowUpRight size={14}/></button></div></div>
-      <div className="spec-section"><span className="spec-number">10</span><div><div className="eyebrow">References</div>{project.references.length ? <div className="spec-reference-list">{project.references.map((reference) => <div key={reference.id}><strong>{reference.title}</strong><span>{reference.focus.join(', ') || 'General direction'}</span><p>{reference.note}</p></div>)}</div> : <p className="spec-muted">No directional references saved.</p>}</div></div>
-      <div className="spec-section"><span className="spec-number">11</span><div><div className="eyebrow">Anti-sameness</div><p className="guardrail">{similarity.score === null ? 'No previous project is available for comparison yet.' : `This direction is ${similarity.score}% similar to “${similarity.project?.name}”. ${similarity.label}. Use this as a prompt to reconsider repeated visual habits—not as a hard rule.`}</p></div></div>
-      <div className="spec-section last"><span className="spec-number">12</span><div><div className="eyebrow">Guardrail</div><p className="guardrail">App Setup is the source of truth for product scope. Explicit scope and resolved required/inferred dependencies outrank everything else. Optional Project Context is verbatim human guidance only and never changes scope automatically. Capabilities and visual patterns are applied only when compatible with resolved App Setup; excluded saved selections are not requirements. Recommended behavior/quality defaults apply only inside active scope. Preserve usability, responsiveness, accessibility, data integrity, and the actual workflow; references remain directional only.</p></div></div>
-    </section><aside className="spec-aside"><div className="aside-card"><Sparkles size={18}/><strong>AI implementation prompt</strong><p>Includes the full contract, acceptance criteria, edge cases, and review signals.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy prompt <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Project spec</strong><p>Human-first summary with exhaustive setup contract kept as an appendix.</p><button className="text-button" onClick={() => copy(markdown, 'Markdown copied')}>Copy Markdown <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Docs manifest</strong><p>Exact selected Markdown files with purpose and suggested sections.</p><button className="text-button" onClick={() => copy(docsManifest, 'Docs manifest copied')}>Copy manifest <Copy size={13}/></button></div><div className="aside-card"><Settings2 size={18}/><strong>Structured JSON</strong><p>Portable contract plus readiness, acceptance criteria, edge cases, and app-type fit.</p><button className="text-button" onClick={() => copy(jsonSpec, 'JSON copied')}>Copy JSON <Copy size={13}/></button></div></aside></div>
+      <div className="spec-section"><span className="spec-number">04</span><div><div className="eyebrow">Core flows · user-authored</div>{project.coreFlows.length ? <div className="spec-core-flows">{project.coreFlows.map((flow) => { const quality = coreFlowQuality(flow); return <article key={flow.id}><div><h3>{flow.title || 'Untitled flow'}</h3><span>{flow.actor || 'Actor not specified'} · {quality.complete ? 'Ready' : `${quality.score}% complete`}</span></div><p>{flow.goal || 'Goal not specified'} → <strong>{flow.successState || 'Success state not specified'}</strong></p><div className="spec-flow-path">{flow.steps.filter((step) => step.trim()).slice(0, 6).map((step, index) => <span key={`${flow.id}-${index}`}>{index + 1}. {step}</span>)}</div></article> })}</div> : <div className="spec-empty"><p>No user-authored workflow contract supplied. App Setup remains authoritative and implementation agents should not invent major workflow scope.</p><button className="text-button" onClick={() => setView('flows')}>Define core flows <ArrowUpRight size={14}/></button></div>}<button className="text-button" onClick={() => setView('flows')}>Review core flows <ArrowUpRight size={14}/></button></div></div>
+      <div className="spec-section"><span className="spec-number">05</span><div><div className="eyebrow">Derived implementation roadmap</div><div className="spec-roadmap-list">{roadmap.phases.map((phase, index) => <article key={phase.id} className={phase.blocking ? 'blocking' : ''}><span>{String(index + 1).padStart(2, '0')}</span><div><div><h3>{phase.title}</h3><small>{phase.kind}{phase.blocking ? ' · blocking gate' : ''}</small></div><p>{phase.objective}</p><em>{phase.deliverables.length} deliverable{phase.deliverables.length === 1 ? '' : 's'} · {phase.proof.length} proof gate{phase.proof.length === 1 ? '' : 's'}</em></div></article>)}</div><p className="spec-muted">Derived automatically from resolved App Setup + Core Flows. It sequences work but never creates scope.</p><button className="text-button" onClick={() => setView('roadmap')}>Open implementation roadmap <ArrowUpRight size={14}/></button></div></div>
+      <div className="spec-section"><span className="spec-number">06</span><div><div className="eyebrow">Product direction</div><h2>{project.dna.personality}</h2><div className="spec-facts"><span>{project.dna.mobileFirst ? 'Mobile-first' : 'Responsive'}</span><span>{project.dna.easePriority} usability</span><span>{project.dna.stretch} creative stretch</span><span>{project.dna.typography}</span></div></div></div>
+      <div className="spec-section"><span className="spec-number">07</span><div><div className="eyebrow">Capabilities</div>{resolvedCapabilities.length ? <div className="spec-capability-list">{resolvedCapabilities.map((cap) => <span key={cap.id}>{cap.name}</span>)}</div> : <div className="spec-empty"><p>No compatible capabilities in resolved App Setup.</p><button className="text-button" onClick={() => setView('capabilities')}>Review product capabilities <ArrowUpRight size={14}/></button></div>}</div></div>
+      <div className="spec-section"><span className="spec-number">08</span><div><div className="eyebrow">Visual Studio</div><div className="spec-facts"><span>{project.dna.themeMode}</span><span>{project.dna.typographyCharacter}</span><span>{project.dna.sectionStrategy}</span><span>{project.dna.surfaceLanguage}</span><span>{project.dna.motionAmount} · {project.dna.motionCharacter}</span></div><div className="visual-dna-summary"><Metric name="Density" value={project.dna.density}/><Metric name="Icons" value={project.dna.iconWeight}/><Metric name="Surfaces" value={project.dna.cardWeight}/><Metric name="Corners" value={project.dna.radius}/><Metric name="Motion" value={project.dna.motion}/></div><div className="spec-colors">{Object.entries(project.dna.palette).slice(0, 8).map(([role, color]) => <span key={role} style={{ background: color }} title={`${role}: ${color}`}/>)}</div>{project.dna.visualAntiPatterns.length > 0 && <p className="spec-muted">Avoid: {project.dna.visualAntiPatterns.join(', ')}</p>}</div></div>
+      <div className="spec-section"><span className="spec-number">09</span><div className="spec-patterns"><div className="eyebrow">Selected visual patterns</div>{resolvedPatterns.length === 0 ? <div className="spec-empty"><p>No compatible visual patterns in resolved App Setup.</p><button className="text-button" onClick={() => setView('patterns')}>Review visual patterns <ArrowUpRight size={14}/></button></div> : resolvedPatterns.map((pattern) => <article key={pattern.id}><div><span>{pattern.category}</span><h3>{pattern.name}</h3></div><button onClick={() => copy(pattern.prompt, `${pattern.name} prompt copied`)}><Copy size={14}/></button><p>{pattern.prompt}</p></article>)}</div></div>
+      {layerSignals.length > 0 && <div className="spec-section"><span className="spec-number">10</span><div><div className="eyebrow">Cross-layer review</div><p className="spec-muted">Saved choices below are preserved but excluded from generated implementation direction because App Setup currently says they do not apply.</p><div className="spec-review-signals">{layerSignals.map((signal) => <p key={signal}>{signal}</p>)}</div></div></div>}
+      <div className="spec-section"><span className="spec-number">11</span><div><div className="eyebrow">MVP project docs</div><div className="spec-doc-list">{selectedDocs.length ? selectedDocs.map((doc) => <code key={doc.id}>{doc.filename}</code>) : <p className="spec-muted">No documentation files selected.</p>}</div><button className="text-button" onClick={() => setView('docs')}>Edit documentation checklist <ArrowUpRight size={14}/></button></div></div>
+      <div className="spec-section"><span className="spec-number">12</span><div><div className="eyebrow">References</div>{project.references.length ? <div className="spec-reference-list">{project.references.map((reference) => <div key={reference.id}><strong>{reference.title}</strong><span>{reference.focus.join(', ') || 'General direction'}</span><p>{reference.note}</p></div>)}</div> : <p className="spec-muted">No directional references saved.</p>}</div></div>
+      <div className="spec-section"><span className="spec-number">13</span><div><div className="eyebrow">Anti-sameness</div><p className="guardrail">{similarity.score === null ? 'No previous project is available for comparison yet.' : `This direction is ${similarity.score}% similar to “${similarity.project?.name}”. ${similarity.label}. Use this as a prompt to reconsider repeated visual habits—not as a hard rule.`}</p></div></div>
+      <div className="spec-section last"><span className="spec-number">14</span><div><div className="eyebrow">Guardrail</div><p className="guardrail">App Setup is the source of truth for product scope. Explicit scope and resolved required/inferred dependencies outrank everything else. Core Flows are explicit workflow intent only inside resolved scope and never activate excluded capabilities. The Derived Implementation Roadmap sequences that resolved work but never creates or overrides scope. Optional Project Context is verbatim human guidance only and never changes scope automatically. Capabilities and visual patterns are applied only when compatible with resolved App Setup; excluded saved selections are not requirements. Recommended behavior/quality defaults apply only inside active scope. Preserve usability, responsiveness, accessibility, data integrity, and the actual workflow; references remain directional only.</p></div></div>
+    </section><aside className="spec-aside"><div className="aside-card"><Sparkles size={18}/><strong>AI implementation prompt</strong><p>Includes the full contract, derived roadmap, acceptance criteria, edge cases, and review signals.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy prompt <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Project spec</strong><p>Human-first summary with exhaustive setup contract kept as an appendix.</p><button className="text-button" onClick={() => copy(markdown, 'Markdown copied')}>Copy Markdown <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Docs manifest</strong><p>Exact selected Markdown files with purpose and suggested sections.</p><button className="text-button" onClick={() => copy(docsManifest, 'Docs manifest copied')}>Copy manifest <Copy size={13}/></button></div><div className="aside-card"><Settings2 size={18}/><strong>Structured JSON</strong><p>Portable contract plus roadmap, readiness, acceptance criteria, edge cases, and app-type fit.</p><button className="text-button" onClick={() => copy(jsonSpec, 'JSON copied')}>Copy JSON <Copy size={13}/></button></div></aside></div>
   </>
 }
 

@@ -1,12 +1,20 @@
 {
   "name": "rverse-blueprint",
   "private": true,
-  "version": "0.18.0",
+  "version": "0.24.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run test:engine && npm run test:persistence && npm run test:review && npm run test:flows && npm run test:roadmap && npm run test:productization",
+    "test:engine": "node scripts/engine-regression.mjs",
+    "preview": "vite preview",
+    "test:persistence": "node scripts/persistence-regression.mjs",
+    "test:review": "node scripts/review-intelligence-regression.mjs",
+    "test:flows": "node scripts/core-flows-regression.mjs",
+    "test:roadmap": "node scripts/implementation-roadmap-regression.mjs",
+    "test:productization": "node scripts/reusable-product-regression.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",
