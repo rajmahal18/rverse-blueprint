@@ -217,7 +217,7 @@ export function settingGuidance(setting: ConfigSetting, config: ProjectConfig): 
   return 'Recommended'
 }
 
-export function configQuickFixes(config: ProjectConfig): ConfigAction[] {
+function allConfigQuickFixes(config: ProjectConfig): ConfigAction[] {
   const fixes: ConfigAction[] = []
   const add = (fix: ConfigAction) => fixes.push(fix)
   if (value(config, 'admin.enabled') === true && value(config, 'login.enabled') === false) add({ id: 'protect-admin', title: 'Protect the admin surface', detail: 'Enable login so administrative routes have an authentication boundary.', changes: [{ id: 'login.enabled', value: true }] })
@@ -236,7 +236,15 @@ export function configQuickFixes(config: ProjectConfig): ConfigAction[] {
   if (active(config, 'security.csrf') && value(config, 'security.csrf') === 'Off') add({ id: 'enable-csrf', title: 'Restore CSRF protection', detail: 'Cookie-authenticated state changes need framework/origin/token protection.', changes: [{ id: 'security.csrf', value: 'Framework + origin/token checks' }] })
   if (active(config, 'eng.secretSeparation') && value(config, 'eng.secretSeparation') === 'Shared credentials') add({ id: 'separate-secrets', title: 'Separate production credentials', detail: 'Keep dev/staging mistakes or compromise from directly reaching production.', changes: [{ id: 'eng.secretSeparation', value: 'Separate production credentials' }] })
   if (active(config, 'records.delete') && value(config, 'records.delete') === 'Hard delete' && ['Government System', 'Clinic / EMR'].includes(config.appType)) add({ id: 'safe-delete', title: 'Use recoverable record handling', detail: 'Sensitive operational records should not disappear through routine hard deletion.', changes: [{ id: 'records.delete', value: config.appType === 'Clinic / EMR' ? 'No user deletion' : 'Soft delete + restore' }] })
-  return fixes.slice(0, 6)
+  return fixes
+}
+
+export function configQuickFixes(config: ProjectConfig): ConfigAction[] {
+  return allConfigQuickFixes(config).slice(0, 6)
+}
+
+export function configQuickFixById(config: ProjectConfig, id: string) {
+  return allConfigQuickFixes(config).find((fix) => fix.id === id)
 }
 
 export function domainSuggestions(config: ProjectConfig): ConfigSuggestion[] {
@@ -454,6 +462,120 @@ export function projectContextReviewSignals(context: ProjectContext, config: Pro
       severity: 'advisory',
       category: 'scope',
       affectedSettings: ['pack.payments'],
+    })
+  }
+
+
+  const subscriptionIntent = has(
+    /\bsubscription(?:s)?\b/, /\brecurring billing\b/, /\bmonthly (?:plan|billing|subscription)\b/,
+    /\bannual (?:plan|billing|subscription)\b/, /\bfree trial\b/, /\bseat[- ]based billing\b/
+  )
+  if (subscriptionIntent && !resolveScope(config, 'pack.subscriptions').active) {
+    signals.push({
+      id: 'context-subscriptions-mismatch',
+      title: 'Possible subscription scope mismatch',
+      detail: 'Project Context describes subscription plans, trials, or recurring billing, but Subscriptions & SaaS billing is not active. Review that pack if recurring billing belongs in the product.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.subscriptions'],
+    })
+  }
+
+  const inventoryIntent = has(
+    /\binventory (?:system|management|tracking|control)\b/, /\bstock (?:management|tracking|movement|movements|levels?|on hand)\b/,
+    /\bwarehouse (?:management|stock|inventory)\b/, /\bsku(?:s)?\b/, /\bbarcode (?:inventory|stock|scanning)\b/,
+    /\bstock[- ]in\b/, /\bstock[- ]out\b/, /\binter[- ]?branch transfers?\b/
+  )
+  if (inventoryIntent && !resolveScope(config, 'pack.inventory').active) {
+    signals.push({
+      id: 'context-inventory-mismatch',
+      title: 'Possible inventory scope mismatch',
+      detail: 'Project Context describes stock, inventory, warehouse, SKU, barcode, or stock-movement operations, but Inventory & POS is not active. Review that pack if the product must maintain authoritative stock state.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.inventory'],
+    })
+  }
+
+  const reportingIntent = has(
+    /\breports? and analytics\b/, /\breporting dashboard\b/, /\banalytics dashboard\b/, /\boperational reports?\b/,
+    /\bscheduled reports?\b/, /\bkpi dashboard\b/, /\bmetrics dashboard\b/, /\bexport(?:able)? reports?\b/
+  )
+  if (reportingIntent && !resolveScope(config, 'pack.reporting').active) {
+    signals.push({
+      id: 'context-reporting-mismatch',
+      title: 'Possible reporting scope mismatch',
+      detail: 'Project Context explicitly asks for reports, analytics, governed metrics, or report exports, but Reports & analytics is not active. Review that pack if reporting is part of the required outcome.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.reporting'],
+    })
+  }
+
+  const directoryIntent = has(
+    /\b(?:business|court|provider|member|people|service|venue) directory\b/, /\bdirectory (?:website|app|system|platform)\b/,
+    /\bmarketplace listings?\b/, /\bsearch(?:able)? listings?\b/, /\bowner claim\b/, /\bfeatured listings?\b/
+  )
+  if (directoryIntent && !resolveScope(config, 'pack.directory').active) {
+    signals.push({
+      id: 'context-directory-mismatch',
+      title: 'Possible directory scope mismatch',
+      detail: 'Project Context describes a directory, searchable listings, marketplace discovery, owner claims, or featured listings, but Directory & marketplace is not active.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.directory'],
+    })
+  }
+
+  const tournamentIntent = has(
+    /\btournament (?:app|system|management|platform)\b/, /\bbracket(?:s)?\b/, /\bstandings\b/,
+    /\blive score(?:s|board)?\b/, /\bmatch scoring\b/, /\bgroup stage\b/, /\bteam lineups?\b/
+  )
+  if (tournamentIntent && !resolveScope(config, 'pack.tournament').active) {
+    signals.push({
+      id: 'context-tournament-mismatch',
+      title: 'Possible tournament scope mismatch',
+      detail: 'Project Context describes tournament management, brackets, standings, match scoring, lineups, or live results, but Tournament & event is not active.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.tournament'],
+    })
+  }
+
+  const governmentWorkflowIntent = has(
+    /\bdocument tracking system\b/, /\bdocument routing\b/, /\broute documents?\b/, /\brouting slip\b/,
+    /\bsignator(?:y|ies)\b/, /\bturnaround tracking\b/, /\breceiving and routing\b/, /\bpublic document tracking\b/
+  )
+  if (governmentWorkflowIntent && !resolveScope(config, 'pack.government').active) {
+    signals.push({
+      id: 'context-government-workflow-mismatch',
+      title: 'Possible document-workflow scope mismatch',
+      detail: 'Project Context describes document intake, routing, signatories, turnaround, or tracking, but Government & document workflow is not active. Review that pack if routed documents are a core product record.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.government'],
+    })
+  }
+
+  const clinicIntent = has(
+    /\bclinic (?:system|management|app)\b/, /\bemr\b/, /\belectronic medical records?\b/, /\bpatient records?\b/,
+    /\bclinical notes?\b/, /\bvital signs?\b/, /\bdoctor(?:'s)? orders?\b/, /\bmedical records?\b/
+  )
+  if (clinicIntent && !resolveScope(config, 'pack.clinic').active) {
+    signals.push({
+      id: 'context-clinic-mismatch',
+      title: 'Possible clinic/EMR scope mismatch',
+      detail: 'Project Context describes patient or clinical records, vitals, clinical notes, orders, or EMR workflows, but Clinic & EMR is not active. Review that pack if protected clinical records belong in the product.',
+      targetSection: 'business',
+      severity: 'advisory',
+      category: 'scope',
+      affectedSettings: ['pack.clinic'],
     })
   }
 

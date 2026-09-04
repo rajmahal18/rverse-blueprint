@@ -203,13 +203,15 @@ check('Primary compiler gives fresh Approved Visual Contract priority before pro
   assert.match(source, /BLUEPRINT_REFERENCE\.md for audit\/debugging only/)
 })
 
-check('v0.31 persistence/export metadata and structured JSON versions are advanced', () => {
+check('v0.31 approval-era persistence/export metadata remains supported in later releases', () => {
   const source = readFileSync(join(root, 'src/App.tsx'), 'utf8')
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '0.31.0')
+  const [major, minor] = pkg.version.split('.').map(Number)
+  assert.equal(major, 0)
+  assert.ok(minor >= 31)
   assert.match(source, /version: 14/)
-  assert.match(source, /blueprintVersion: '0\.31\.0'/)
-  assert.match(source, /version: 19/)
+  assert.match(source, /blueprintVersion: '0\.3[1-9]\.\d+'/)
+  assert.match(source, /version: (?:19|2\d)/)
 })
 
 rmSync(buildDir, { recursive: true, force: true })

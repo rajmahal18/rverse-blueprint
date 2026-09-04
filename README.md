@@ -1,10 +1,45 @@
-# Blueprint — Interactive Approval + Visual Contract (v0.31)
+# Blueprint — Visual Guidance / Anti-Dumb UX (v0.33.0)
 
 Blueprint is a local-first **application specification + visual direction workspace**. It makes product behavior, engineering expectations, and visual intent explicit before coding—without turning planning into another tedious questionnaire.
 
 ## Non-negotiable product rule
 
 **Usability comes first.** A new workspace is already valid. Recommended defaults are applied automatically, irrelevant settings stay hidden, advanced controls stay out of the way until needed, and the normal workflow is to configure exceptions—not answer hundreds of questions.
+
+
+## v0.33.0 — Visual Guidance / TL;DR Mode
+
+v0.33 makes the existing Blueprint intelligence easier to scan and understand without weakening the v0.32 anti-dumb architecture. A persistent **TL;DR mode** shortens dense sections while preserving blockers, readiness, approval state, and primary actions; reusable circular **ⓘ concept explainers** clarify unfamiliar terms at the point of use; Setup now has a stronger **Describe → Resolve → Tune if needed** visual path; and required/recommended states receive stronger visual severity cues. Visual Studio and Preview Studio also explain visual-authority concepts such as design autonomy, visual originality, Preview authority, and Visual approval instead of assuming design-system vocabulary.
+
+TL;DR is display-only, defaults Off, and never mutates project scope. Concept explainers are also presentation-only. The core authority rule remains absolute: **Suggested is never silently converted to On.**
+
+Structured JSON remains **v20** and backup schema remains **v14** because v0.33 introduces no project-data migration. Package/Blueprint metadata are `0.33.0`. Validation covers **229 named regression checks**: the previous **213/213** historical chain plus **16/16** dedicated v0.33 Visual Guidance checks.
+
+## v0.32.1 — Anti-Dumb UX hardening
+
+This patch closes the remaining guided-experience loopholes found during the v0.32 audit. All unresolved guided decisions now use one shared definition across Home, Setup, badges, banners, Finder, exports, and build-readiness, so Blueprint cannot report a blocked setup while simultaneously showing an all-clear state. Typed App Setup blockers can expose their exact quick fix directly in the guided card; Project Context is presented as a recommended first step rather than disposable optional copy; high-confidence intent detection now covers inventory, clinic/EMR, document workflows, tournaments, directories, reporting, and subscriptions; and Find Anything tolerates common spelling mistakes such as `bokking` and `pasword`. These changes preserve the core authority rule: **Suggested is never silently converted to On.**
+
+## v0.32 — Guided Experience / Anti-Dumb UX
+
+v0.32 keeps the full v0.31 intelligence stack but changes the default product experience from **browse hundreds of controls** to **tell Blueprint what you are building, then resolve the few decisions that actually matter**.
+
+Core UX direction:
+
+- **Guided-first navigation:** Home → Setup → Design → Preview → Review & Build. Specialist/low-frequency surfaces live under Advanced tools.
+- **What needs my attention?** Home and Review & Build surface goal-critical unresolved decisions before secondary configuration.
+- **Human Setup Readiness:** Blueprint can say that the stated goal is not implementable yet (for example, booking intent while Booking & Scheduling is Off) without silently activating the missing scope.
+- **Recommended Setup actions:** Include / Review / Not needed controls let users explicitly resolve recommendations without hunting through the settings catalog. `Suggested != On` remains absolute.
+- **Apply Recommended Setup:** returns an explicit set of recommended scope choices for user approval; the helper itself never mutates project scope.
+- **Find Anything:** Ctrl/Cmd+K or `/` searches the whole settings knowledge base, including dormant business packs and Advanced controls, and deep-links to the exact setting.
+- **Progressive disclosure:** the full 918+ setting library remains available, but the default workflow hides irrelevant complexity until requested.
+- **No dead ends:** core guided screens expose the current status and next useful action.
+- **Advanced escape hatch:** power users retain direct access to the complete configuration/intelligence surfaces.
+- **Compiler integration:** Human Setup Readiness is exported as guidance but is explicitly not scope authority.
+- **Build-readiness guard:** a goal-critical unresolved capability can block “Ready to build” while remaining advisory until the user explicitly includes it.
+
+At the v0.32.1 milestone, structured JSON was **v20**, package/Blueprint metadata were `0.32.1`, and backup schema remained **v14** because Guided Experience was derived/presentation state and required no migration. That release covered **213 named regression checks**, including **17 dedicated v0.32 Guided Experience checks**.
+
+v0.32.1 release validation: full regression chain **213/213**. The hardening patch also added explicit regression coverage for unresolved App Setup blockers, typo-tolerant Find Anything matching, and broader Project Context intent surfacing.
 
 ## v0.31 — Interactive Approval + Visual Contract Integration
 

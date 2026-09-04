@@ -9,7 +9,10 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleHelp,
+  CircleCheckBig,
+  Command,
   ClipboardList,
   Compass,
   Copy,
@@ -45,6 +48,7 @@ import {
 import PatternPreview from './components/PatternPreview'
 import VisualStudio from './components/VisualStudio'
 import PreviewStudio from './components/PreviewStudio'
+import { ConceptInfo, GuidanceProvider, GuidanceToggle, TldrOnly, TldrSummary, VerboseOnly, useGuidanceMode } from './components/Guidance'
 import { inspiration, patterns, type Pattern, type PatternCategory, type PatternLevel } from './data/catalog'
 import { colorLuminance, contrastRatio, defaultDna, fontFamilyFor, normalizeDna, resolvedDarkPalette, visualDnaContract, type Dna } from './data/visualDna'
 import { capabilities, capabilityCategories, type Capability, type CapabilityCategory, type CapabilityLevel } from './data/capabilities'
@@ -90,6 +94,7 @@ import {
 import {
   acceptanceCriteria,
   appTypeMatches,
+  configQuickFixById,
   configQuickFixes,
   configReadiness,
   contextGapDecisions,
@@ -101,6 +106,7 @@ import {
   type ConfigAction,
 } from './data/intelligence'
 import { configReviewSignals, type ReviewSignal } from './data/reviewSignals'
+import { guidedBuildStatus, guidedSearchEntries, guidedSearchMatches, guidedSetupDecisions, guidedUnresolvedDecisions, recommendedScopeIds, type GuidedDecision } from './data/guidedExperience'
 import { compileScopeContract, fullBlueprintReferencePrompt, implementationConfigContractPrompt, scopeContractPrompt, scopeStateSummary } from './data/promptCompiler'
 import { visualContradictionSignals } from './data/visualReview'
 import { synthesizeVisualDirector, visualDirectorPrompt, type VisualDirectorOutput } from './data/visualDirector'
@@ -119,6 +125,22 @@ import {
 } from './data/persistence'
 
 type View = 'home' | 'setup' | 'flows' | 'roadmap' | 'patterns' | 'compare' | 'capabilities' | 'docs' | 'dna' | 'preview' | 'references' | 'inspiration' | 'spec'
+
+
+function configWithAction(config: ProjectConfig, action: ConfigAction) {
+  let next = config
+  for (const change of action.changes) {
+    const setting = configSettings.find((item) => item.id === change.id)
+    if (setting && isScopeSetting(change.id)) {
+      if (setting.kind === 'boolean') next = setScopeChoice(next, change.id, change.value === true ? 'On' : 'Off')
+      else {
+        next = setScopeChoice(next, change.id, 'On')
+        next = setConfigValue(next, change.id, change.value)
+      }
+    } else next = setConfigValue(next, change.id, change.value)
+  }
+  return next
+}
 
 type ReferenceFocus = 'Navigation' | 'Layout' | 'Typography' | 'Color' | 'Motion' | 'Components' | 'Composition' | 'Other'
 
@@ -196,7 +218,7 @@ type BackupAsset = {
 
 type BackupBundle = {
   version: 14
-  blueprintVersion: '0.31.0'
+  blueprintVersion: '0.33.0'
   exportedAt: string
   activeProjectId: string
   projects: Project[]
@@ -218,6 +240,7 @@ const STORAGE = {
   custom: 'blueprint:custom-patterns:v2',
   customCapabilities: 'blueprint:custom-capabilities:v3',
   learning: 'blueprint:learning-mode:v2',
+  tldr: 'blueprint:tldr-mode:v1',
   configPresets: 'blueprint:config-presets:v1',
   v1Selected: 'blueprint:selected-patterns:v1',
   v1Dna: 'blueprint:dna:v1',
@@ -754,6 +777,9 @@ function buildMarkdown(project: Project, selectedPatterns: Pattern[], selectedCa
     : '- No external references saved.'
   const docs = projectDocs.filter((doc) => project.docs.includes(doc.id))
   const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const guidedDecisions = guidedSetupDecisions(project.context, config)
+  const guidedStatus = guidedBuildStatus(project.context, config, approval.status)
+  const guidedAttention = guidedUnresolvedDecisions(guidedDecisions)
   const currentVisualGuidance = `## Current visual guidance — ${approval.status === 'stale' ? 'provisional until re-approval' : 'not yet approved'}
 ### Visual Director
 ${visualDirectorPrompt(director)}
@@ -790,7 +816,7 @@ No approved Visual Contract exists yet. The current synthesis below remains edit
 
 ${currentVisualGuidance}`
 
-  return `# ${project.name}\n\n## Blueprint summary\n${buildConfigHighlights(config)}\n- Readiness: ${readiness.label} (${readiness.score}% coherence indicator)\n- Decision coverage: ${readiness.coverage}%\n- App Setup severity: ${readiness.blockers} blocker · ${readiness.important} important · ${readiness.review} review · ${readiness.advisory} advisory\n${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length ? `- Review signals: ${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length} (${reviewSignals.length} App Setup typed, ${contextSignals.length} Project Context advisory, ${visualSignals.length} visual, ${layerSignals.length} cross-layer)` : '- Review signals: None'}\n\n## User-provided project context — optional / verbatim\n${projectContextPrompt(project.context)}\n\nThis context is interpretive guidance only. It must not create, remove, or override structured Blueprint scope.\n\n## Core flows — user-authored workflow truth\n${coreFlowsMarkdown(project.coreFlows, 3)}\n\nCore flows describe intended actor journeys only inside active App Setup scope. They must not activate a capability that is Suggested, Off, or otherwise inactive.\n\n## Derived implementation roadmap\n${implementationRoadmapMarkdown(roadmap, 3)}\n\nThe roadmap is sequencing guidance derived from App Setup + Core Flows. It never creates scope, and a roadmap item must be narrowed or dropped when its underlying App Setup scope is inactive.\n\n## Acceptance criteria\n${criteria.map((item) => `- ${item}`).join('\n')}\n\n## Edge cases to prove\n${cases.map((item) => `- ${item}`).join('\n')}\n\n${reviewSignals.length ? `## App Setup review signals — typed by severity\n${reviewSignals.map((signal) => `- ${formatReviewSignal(signal)}`).join('\n')}\n\n` : ''}${contextSignals.length ? `## Project Context review signals — advisory only\nThese signals do not change structured scope. Review them only if they reveal that App Setup does not match the user's stated intent.\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\n\n` : ''}${visualSignals.length ? `## Visual review signals\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}${contextDecisions.length ? `## Context-aware gap filling — presentation/detail only\nMode: ${String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}. Provenance: context_completion. These decisions never authorize optional functional scope.\n${contextDecisions.map((decision) => `- [${decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · ${decision.confidence}] ${decision.decision}\n  Reason: ${decision.reason}\n  Source: ${decision.source}`).join('\n')}\n\n` : ''}## Product direction\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n- Design autonomy: ${dna.designAutonomy}\n- Visual originality: ${dna.visualOriginality}\n\n${visualAuthoritySection}\n\n${layerSignals.length ? `## Cross-layer review\nThese saved selections are preserved but intentionally excluded from implementation direction until App Setup makes them compatible:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Directional references\n${references}\n\n## MVP documentation to generate\n${docs.length ? docs.map((doc) => `- ${doc.filename} — ${doc.summary}`).join('\n') : '- No project documentation files selected.'}\n\n## Visual differentiation check\n${patternIntel.antiHomogeneity.summary}\n${patternIntel.antiHomogeneity.repeatedTraits.length ? `Repeated traits: ${patternIntel.antiHomogeneity.repeatedTraits.join('; ')}.` : 'No dominant repeated traits detected yet.'}\n\n## Compiled implementation contract\nThis is the execution-oriented contract. Full resolved detail is exported separately in BLUEPRINT_REFERENCE.md.\n\n${implementationConfigContractPrompt(config)}\n\n## Implementation principle\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices constrain how already-selected product scope is packaged, isolated, configured, and upgraded across organizations; they never activate a business capability by themselves. The Derived Implementation Roadmap is sequencing guidance only and cannot create or override scope. Preserve usability, responsiveness, accessibility, data integrity, and the app's actual workflow. References are directional; do not copy external designs verbatim. Avoid generic SaaS styling, arbitrary visual effects, repetitive admin work that can reasonably be automated, and repeating the same visual language across unrelated projects.\n`
+  return `# ${project.name}\n\n## Blueprint summary\n${buildConfigHighlights(config)}\n- Guided setup: ${guidedStatus.label} — ${guidedStatus.detail}\n- Readiness: ${readiness.label} (${readiness.score}% coherence indicator)\n- Decision coverage: ${readiness.coverage}%\n- App Setup severity: ${readiness.blockers} blocker · ${readiness.important} important · ${readiness.review} review · ${readiness.advisory} advisory\n${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length ? `- Review signals: ${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length} (${reviewSignals.length} App Setup typed, ${contextSignals.length} Project Context advisory, ${visualSignals.length} visual, ${layerSignals.length} cross-layer)` : '- Review signals: None'}\n\n## Human setup readiness\n${guidedStatus.state === 'blocked' ? 'Implementation handoff is blocked by goal-critical setup decisions that the user has not explicitly resolved.' : guidedStatus.state === 'attention' ? 'The Blueprint can continue, but the user still has recommendations or visual approval work to review.' : 'No goal-critical setup mismatch is unresolved.'}\n${guidedAttention.length ? guidedAttention.map((decision) => `- ${decision.priority.toUpperCase()}: ${decision.title}\n  Impact: ${decision.impact}\n  Resolution must be an explicit user action; this helper layer cannot activate scope automatically.`).join('\n') : '- No unresolved guided-setup decisions.'}\n\n## User-provided project context — optional / verbatim\n${projectContextPrompt(project.context)}\n\nThis context is interpretive guidance only. It must not create, remove, or override structured Blueprint scope.\n\n## Core flows — user-authored workflow truth\n${coreFlowsMarkdown(project.coreFlows, 3)}\n\nCore flows describe intended actor journeys only inside active App Setup scope. They must not activate a capability that is Suggested, Off, or otherwise inactive.\n\n## Derived implementation roadmap\n${implementationRoadmapMarkdown(roadmap, 3)}\n\nThe roadmap is sequencing guidance derived from App Setup + Core Flows. It never creates scope, and a roadmap item must be narrowed or dropped when its underlying App Setup scope is inactive.\n\n## Acceptance criteria\n${criteria.map((item) => `- ${item}`).join('\n')}\n\n## Edge cases to prove\n${cases.map((item) => `- ${item}`).join('\n')}\n\n${reviewSignals.length ? `## App Setup review signals — typed by severity\n${reviewSignals.map((signal) => `- ${formatReviewSignal(signal)}`).join('\n')}\n\n` : ''}${contextSignals.length ? `## Project Context review signals — advisory only\nThese signals do not change structured scope. Review them only if they reveal that App Setup does not match the user's stated intent.\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\n\n` : ''}${visualSignals.length ? `## Visual review signals\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}${contextDecisions.length ? `## Context-aware gap filling — presentation/detail only\nMode: ${String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}. Provenance: context_completion. These decisions never authorize optional functional scope.\n${contextDecisions.map((decision) => `- [${decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · ${decision.confidence}] ${decision.decision}\n  Reason: ${decision.reason}\n  Source: ${decision.source}`).join('\n')}\n\n` : ''}## Product direction\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n- Design autonomy: ${dna.designAutonomy}\n- Visual originality: ${dna.visualOriginality}\n\n${visualAuthoritySection}\n\n${layerSignals.length ? `## Cross-layer review\nThese saved selections are preserved but intentionally excluded from implementation direction until App Setup makes them compatible:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Directional references\n${references}\n\n## MVP documentation to generate\n${docs.length ? docs.map((doc) => `- ${doc.filename} — ${doc.summary}`).join('\n') : '- No project documentation files selected.'}\n\n## Visual differentiation check\n${patternIntel.antiHomogeneity.summary}\n${patternIntel.antiHomogeneity.repeatedTraits.length ? `Repeated traits: ${patternIntel.antiHomogeneity.repeatedTraits.join('; ')}.` : 'No dominant repeated traits detected yet.'}\n\n## Compiled implementation contract\nThis is the execution-oriented contract. Full resolved detail is exported separately in BLUEPRINT_REFERENCE.md.\n\n${implementationConfigContractPrompt(config)}\n\n## Implementation principle\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices constrain how already-selected product scope is packaged, isolated, configured, and upgraded across organizations; they never activate a business capability by themselves. The Derived Implementation Roadmap is sequencing guidance only and cannot create or override scope. Preserve usability, responsiveness, accessibility, data integrity, and the app's actual workflow. References are directional; do not copy external designs verbatim. Avoid generic SaaS styling, arbitrary visual effects, repetitive admin work that can reasonably be automated, and repeating the same visual language across unrelated projects.\n`
 }
 
 function buildBlueprintReference(project: Project, selectedPatterns: Pattern[], patternIntel: PatternExplorerIntelligence) {
@@ -868,6 +894,9 @@ function buildAgentPrompt(project: Project, selectedPatterns: Pattern[], selecte
   const pageIntel = projectPageComposition(project, patternIntel, selectedPatterns, config)
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
   const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const guidedDecisions = guidedSetupDecisions(project.context, config)
+  const guidedStatus = guidedBuildStatus(project.context, config, approval.status)
+  const guidedAttention = guidedUnresolvedDecisions(guidedDecisions)
   const currentVisualGuidance = `VISUAL DIRECTOR — CURRENT SYNTHESIS${approval.status === 'stale' ? ' / PROVISIONAL UNTIL RE-APPROVAL' : ''}
 ${visualDirectorPrompt(director)}
 This synthesis has visual/presentational authority only. It cannot activate functional scope.
@@ -908,12 +937,18 @@ ${currentVisualGuidance}`
 BLUEPRINT SUMMARY
 ${buildConfigHighlights(config)}
 - Visual approval: ${approval.label}.${approval.status === 'stale' ? ` Changed material areas: ${approval.changedAreas.join(', ')}.` : ''}
+- Guided setup: ${guidedStatus.label}. ${guidedStatus.detail}
 - Usability is non-negotiable: common paths must be obvious, advanced/irrelevant controls progressively disclosed, user work preserved, and recovery from errors clear.
 ${reviewSignals.length ? `- Resolve these typed App Setup review signals deliberately before calling the implementation complete:
 ${reviewSignals.map((signal) => `  - ${formatReviewSignal(signal)}`).join('\n')}` : '- The current Blueprint has no App Setup review signals.'}
 ${contextSignals.length ? `- Project Context advisory review: ${contextSignals.length} possible scope mismatch${contextSignals.length > 1 ? 'es' : ''}. These are suggestions only and MUST NOT change scope automatically.` : '- Project Context advisory review: No obvious structured-scope mismatch detected.'}
 ${visualSignals.length ? `- Visual review: ${visualSignals.length} deterministic color/design sanity signal${visualSignals.length > 1 ? 's' : ''} should be resolved or deliberately accepted.` : '- Visual review: No obvious deterministic visual tension.'}
 ${layerSignals.length ? `- Cross-layer review: ${layerSignals.length} saved selection${layerSignals.length > 1 ? 's are' : ' is'} excluded from implementation direction until App Setup becomes compatible.` : '- Cross-layer review: No saved selection conflicts.'}
+
+HUMAN SETUP READINESS
+- ${guidedStatus.label}: ${guidedStatus.detail}
+${guidedAttention.length ? guidedAttention.map((decision) => `- ${decision.priority.toUpperCase()}: ${decision.title} — ${decision.impact}`).join('\n') : '- No unresolved goal-critical guided-setup decision.'}
+This is a human-review helper, not scope authority. Do not infer or activate any missing feature from it; only explicit App Setup choices or hard dependencies authorize functional scope.
 
 CORE FLOWS — USER-AUTHORED WORKFLOW CONTRACT
 ${coreFlowsPrompt(project.coreFlows)}
@@ -974,6 +1009,7 @@ export default function App() {
   const [customCapabilities, setCustomCapabilities] = useState<CustomCapability[]>([])
   const [configPresets, setConfigPresets] = useState<ConfigPreset[]>([])
   const [learningMode, setLearningMode] = useState(() => safeParse<boolean>(STORAGE.learning, true))
+  const [tldrMode, setTldrMode] = useState(() => safeParse<boolean>(STORAGE.tldr, false))
   const [persistenceReady, setPersistenceReady] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>({ state: 'loading', message: 'Opening local workspace…' })
   const [saveRetryNonce, setSaveRetryNonce] = useState(0)
@@ -990,6 +1026,9 @@ export default function App() {
   const [showProjectCreate, setShowProjectCreate] = useState(false)
   const [compareIds, setCompareIds] = useState<string[]>([])
   const [showPowerTools, setShowPowerTools] = useState(false)
+  const [commandOpen, setCommandOpen] = useState(false)
+  const [commandQuery, setCommandQuery] = useState('')
+  const [setupFocusId, setSetupFocusId] = useState('')
   const [toast, setToast] = useState('')
   const importRef = useRef<HTMLInputElement | null>(null)
   const saveTimerRef = useRef<number | null>(null)
@@ -1081,6 +1120,27 @@ export default function App() {
 
   useEffect(() => { if (activeProjectId) safeStorePreference(STORAGE.activeProject, activeProjectId) }, [activeProjectId])
   useEffect(() => { safeStorePreference(STORAGE.learning, learningMode) }, [learningMode])
+  useEffect(() => { safeStorePreference(STORAGE.tldr, tldrMode) }, [tldrMode])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const typing = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setCommandOpen(true)
+        return
+      }
+      if (!typing && event.key === '/') {
+        event.preventDefault()
+        setCommandOpen(true)
+        return
+      }
+      if (event.key === 'Escape') setCommandOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   const notify = (message: string) => {
     setToast(message)
@@ -1122,6 +1182,51 @@ export default function App() {
   const activeApprovalInput = projectApprovalInput(activeProject, patternIntel, selectedPatterns, normalizedActiveConfig, activeDirector, pageIntel)
   const activeApproval = evaluateVisualApproval(activeProject.approvedVisualContract, activeApprovalInput)
   const activeVisualContradictions = visualContradictionSignals(activeProject.dna, resolvedPatterns, activeProject.context).map((signal) => signal.detail)
+  const guidedDecisions = guidedSetupDecisions(activeProject.context, normalizedActiveConfig)
+  const guidedStatus = guidedBuildStatus(activeProject.context, normalizedActiveConfig, activeApproval.status)
+  const guidedSearch = guidedSearchEntries(normalizedActiveConfig)
+
+  const focusSetupSetting = (id: string) => {
+    setSetupFocusId(id)
+    setView('setup')
+    setMobileMenu(false)
+    setCommandOpen(false)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const setScopeExplicitly = (ids: string[], choice: 'On' | 'Off') => {
+    const unique = Array.from(new Set(ids.filter((id) => isScopeSetting(id))))
+    if (!unique.length) return
+    updateProject((current) => {
+      let next = normalizeProjectConfig(current.config)
+      unique.forEach((id) => { next = setScopeChoice(next, id, choice) })
+      return { config: next }
+    })
+    notify(choice === 'On' ? `${unique.length} recommended scope decision${unique.length === 1 ? '' : 's'} included` : `${unique.length} scope decision${unique.length === 1 ? '' : 's'} explicitly excluded`)
+  }
+
+  const applyGuidedDecision = (decision: GuidedDecision) => {
+    if (decision.suggestedFixId) {
+      const fix = configQuickFixById(normalizedActiveConfig, decision.suggestedFixId)
+      if (fix) {
+        updateProject((current) => ({ config: configWithAction(normalizeProjectConfig(current.config), fix) }))
+        notify(fix.title)
+        return
+      }
+    }
+    if (decision.actionableSettingIds.length) {
+      setScopeExplicitly(decision.actionableSettingIds, 'On')
+      return
+    }
+    const first = decision.settingIds.find((id) => configSettings.some((setting) => setting.id === id))
+    if (first) focusSetupSetting(first)
+    else { setView('setup'); setCommandOpen(false) }
+  }
+
+  const rejectGuidedDecision = (decision: GuidedDecision) => {
+    const ids = decision.settingIds.filter((id) => isScopeSetting(id) && !resolveScope(normalizedActiveConfig, id).active)
+    if (ids.length) setScopeExplicitly(ids, 'Off')
+  }
 
   const toggleCapability = (id: string) => {
     const capability = allCapabilities.find((item) => item.id === id)
@@ -1453,7 +1558,7 @@ export default function App() {
       }
       const bundle: BackupBundle = {
         version: 14,
-        blueprintVersion: '0.31.0',
+        blueprintVersion: '0.33.0',
         exportedAt: now(),
         activeProjectId: activeProject.id,
         projects: cleanProjects,
@@ -1549,15 +1654,16 @@ export default function App() {
   const navigate = (next: View) => {
     setView(next)
     setMobileMenu(false)
+    setCommandOpen(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const coreNav = [
-    { id: 'home' as View, label: 'Workspace', icon: Home },
-    { id: 'setup' as View, label: 'App setup', icon: Settings2, count: (activeProject.config.overrides.length + Object.keys(activeProject.config.scopeChoices ?? {}).length) || undefined },
-    { id: 'dna' as View, label: 'Visual Studio', icon: Palette },
-    { id: 'preview' as View, label: 'Preview Studio', icon: Eye },
-    { id: 'spec' as View, label: 'Generated spec', icon: ClipboardList },
+    { id: 'home' as View, label: 'Home', icon: Home },
+    { id: 'setup' as View, label: 'Setup', icon: Settings2, count: guidedUnresolvedDecisions(guidedDecisions).length || undefined },
+    { id: 'dna' as View, label: 'Design', icon: Palette },
+    { id: 'preview' as View, label: 'Preview', icon: Eye },
+    { id: 'spec' as View, label: 'Review & build', icon: ClipboardList },
   ]
   const toolNav = [
     { id: 'flows' as View, label: 'Core flows', icon: ListChecks, count: activeProject.coreFlows.length || undefined },
@@ -1570,8 +1676,9 @@ export default function App() {
     { id: 'compare' as View, label: 'Compare patterns', icon: Layers3, count: compareIds.length || undefined },
   ]
   const powerToolActive = toolNav.some((item) => item.id === view)
+  const topGuidedDecision = guidedUnresolvedDecisions(guidedDecisions)[0]
 
-  return <div className="app-shell">
+  return <GuidanceProvider tldrMode={tldrMode}><div className={`app-shell ${tldrMode ? 'tldr-mode' : ''}`}>
     <aside className="sidebar">
       <button className="brand" onClick={() => navigate('home')}><span className="brand-mark"><Sparkles size={18}/></span><span><strong>Blueprint</strong><small>product + visual blueprint</small></span></button>
       <div className="project-switcher">
@@ -1579,20 +1686,29 @@ export default function App() {
         <label><select value={activeProject.id} onChange={(event) => { setActiveProjectId(event.target.value); setView('home') }}>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select><ChevronDown size={14}/></label>
       </div>
       <nav className="sidebar-nav">{coreNav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><item.icon size={17}/><span>{item.label}</span>{item.count ? <b>{item.count}</b> : null}</button>)}
-        <button className={`nav-tools-toggle ${(showPowerTools || powerToolActive) ? 'open' : ''}`} onClick={() => setShowPowerTools((value) => !value)} aria-expanded={showPowerTools || powerToolActive}><span>More tools</span><ChevronDown size={14}/></button>
+        <button className={`nav-tools-toggle ${(showPowerTools || powerToolActive) ? 'open' : ''}`} onClick={() => setShowPowerTools((value) => !value)} aria-expanded={showPowerTools || powerToolActive}><span>Advanced tools</span><ChevronDown size={14}/></button>
         {(showPowerTools || powerToolActive) && <div className="nav-tools">{toolNav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><item.icon size={16}/><span>{item.label}</span>{item.count ? <b>{item.count}</b> : null}</button>)}</div>}
       </nav>
-      <div className="sidebar-note"><div className="eyebrow"><WandSparkles size={13}/> Configurable core</div><p>Recommendations stay advisory. Optional product scope is included only when you select it or a real dependency requires it.</p></div>
+      <div className="sidebar-note helper-note"><div className="eyebrow"><Command size={13}/> Don't hunt for settings</div><p>Press <strong>Ctrl K</strong> or <strong>/</strong> and type what you want: booking, payments, mobile nav, passwords, anything.</p><button onClick={() => setCommandOpen(true)}><Search size={13}/> Find anything</button></div>
+      <GuidanceToggle active={tldrMode} onToggle={() => setTldrMode((value) => !value)}/>
       <SaveStatus status={saveState} onRetry={() => setSaveRetryNonce((value) => value + 1)}/>
     </aside>
 
-    <header className="mobile-header"><button className="brand compact" onClick={() => navigate('home')}><span className="brand-mark"><Sparkles size={16}/></span><span><strong>Blueprint</strong><small>{activeProject.name}</small></span></button><div className="mobile-header-actions"><SaveStatus status={saveState} compact onRetry={() => setSaveRetryNonce((value) => value + 1)}/><button className="icon-button" onClick={() => setMobileMenu(true)} aria-label="Open menu"><Menu size={19}/></button></div></header>
+    <header className="mobile-header"><button className="brand compact" onClick={() => navigate('home')}><span className="brand-mark"><Sparkles size={16}/></span><span><strong>Blueprint</strong><small>{activeProject.name}</small></span></button><div className="mobile-header-actions"><GuidanceToggle active={tldrMode} compact onToggle={() => setTldrMode((value) => !value)}/><SaveStatus status={saveState} compact onRetry={() => setSaveRetryNonce((value) => value + 1)}/><button className="icon-button" onClick={() => setMobileMenu(true)} aria-label="Open menu"><Menu size={19}/></button></div></header>
 
-    {mobileMenu && <div className="mobile-drawer-wrap" onMouseDown={() => setMobileMenu(false)}><aside className="mobile-drawer" onMouseDown={(event) => event.stopPropagation()}><div className="drawer-head"><strong>{activeProject.name}</strong><button className="icon-button" onClick={() => setMobileMenu(false)} aria-label="Close menu"><X size={18}/></button></div><div className="drawer-group-label">Core flow</div>{coreNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}<div className="drawer-group-label">More tools</div>{toolNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}</aside></div>}
+    {mobileMenu && <div className="mobile-drawer-wrap" onMouseDown={() => setMobileMenu(false)}><aside className="mobile-drawer" onMouseDown={(event) => event.stopPropagation()}><div className="drawer-head"><strong>{activeProject.name}</strong><button className="icon-button" onClick={() => setMobileMenu(false)} aria-label="Close menu"><X size={18}/></button></div><div className="drawer-group-label">Main</div>{coreNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}<div className="drawer-group-label">Advanced tools</div>{toolNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}</aside></div>}
 
     <main className="main-content">
-      {view === 'home' && <HomeView project={activeProject} projects={projects} patterns={allPatterns} recommendations={recommendations} similarity={similarity} patternIntel={patternIntel} setView={navigate} updateProject={updateProject} create={() => setShowProjectCreate(true)} duplicate={duplicateProject} remove={deleteProject} addSnapshot={addSnapshot} restoreSnapshot={restoreSnapshot} exportBackup={exportBackup} importRef={importRef} importBackup={importBackup}/>} 
-      {view === 'setup' && <SetupView project={activeProject} updateProject={updateProject} notify={notify} presets={configPresets} savePreset={saveConfigPreset} applyPreset={applyConfigPreset} deletePreset={deleteConfigPreset} setView={navigate}/>} 
+      {view !== 'home' && (topGuidedDecision || guidedStatus.state !== 'ready') && <section className={`global-guide-banner ${guidedStatus.state}`}>
+        <div>{guidedStatus.state === 'ready' ? <CircleCheckBig size={17}/> : <AlertTriangle size={17}/>}<span><strong>{topGuidedDecision ? topGuidedDecision.title : guidedStatus.label}</strong><small>{topGuidedDecision ? topGuidedDecision.impact : guidedStatus.detail}</small></span></div>
+        <div className="global-guide-actions"><button className="text-button" onClick={() => setCommandOpen(true)}><Search size={13}/> Find anything</button>{topGuidedDecision ? <button className="primary-button compact-button" onClick={() => applyGuidedDecision(topGuidedDecision)}>{topGuidedDecision.suggestedFixId ? 'Apply fix' : topGuidedDecision.actionableSettingIds.length ? 'Include now' : 'Review'} <ArrowRight size={13}/></button> : <button className="primary-button compact-button" onClick={() => navigate(guidedStatus.next === 'setup' ? 'setup' : guidedStatus.next === 'preview' ? 'preview' : 'spec')}>Continue <ArrowRight size={13}/></button>}</div>
+      </section>}
+      {view === 'home' && (
+        <HomeView project={activeProject} projects={projects} patterns={allPatterns} recommendations={recommendations} similarity={similarity} patternIntel={patternIntel} approval={activeApproval.status} decisions={guidedDecisions} guidedStatus={guidedStatus} setView={navigate} updateProject={updateProject} applyDecision={applyGuidedDecision} rejectDecision={rejectGuidedDecision} openFinder={() => setCommandOpen(true)} focusSetting={focusSetupSetting} create={() => setShowProjectCreate(true)} duplicate={duplicateProject} remove={deleteProject} addSnapshot={addSnapshot} restoreSnapshot={restoreSnapshot} exportBackup={exportBackup} importRef={importRef} importBackup={importBackup}/>
+      )}
+      {view === 'setup' && (
+        <SetupView project={activeProject} updateProject={updateProject} notify={notify} presets={configPresets} savePreset={saveConfigPreset} applyPreset={applyConfigPreset} deletePreset={deleteConfigPreset} setView={navigate} focusSettingId={setupFocusId} onFocusHandled={() => setSetupFocusId('')} openFinder={() => setCommandOpen(true)}/>
+      )}
       {view === 'flows' && <CoreFlowsView project={activeProject} updateProject={updateProject} notify={notify}/>} 
       {view === 'roadmap' && <RoadmapView project={activeProject} copy={copy} setView={navigate}/>} 
       {view === 'patterns' && <PatternsView patterns={allPatterns} selected={activeProject.selected} config={normalizedActiveConfig} intelligence={patternIntel} applyRecommended={applyPatternRecommendation} compareIds={compareIds} search={search} setSearch={setSearch} category={category} setCategory={setCategory} level={level} setLevel={setLevel} setDetail={setDetail} toggle={togglePattern} toggleCompare={toggleCompare} compare={() => navigate('compare')} addCustom={() => setShowCustom(true)} learningMode={learningMode} setLearningMode={setLearningMode}/>} 
@@ -1607,21 +1723,70 @@ export default function App() {
     </main>
 
     <nav className="mobile-bottom-nav">
-      {[{ id: 'home' as View, icon: Home, label: 'Home' }, { id: 'setup' as View, icon: Settings2, label: 'Setup' }, { id: 'preview' as View, icon: Eye, label: 'Preview' }, { id: 'spec' as View, icon: ClipboardList, label: 'Spec' }].map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => navigate(item.id)}><item.icon size={18}/><span>{item.label}</span></button>)}
+      {[{ id: 'home' as View, icon: Home, label: 'Home' }, { id: 'setup' as View, icon: Settings2, label: 'Setup' }, { id: 'preview' as View, icon: Eye, label: 'Preview' }, { id: 'spec' as View, icon: ClipboardList, label: 'Build' }].map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => navigate(item.id)}><item.icon size={18}/><span>{item.label}</span></button>)}
       <button className={powerToolActive ? 'active' : ''} onClick={() => setMobileMenu(true)} aria-label="Open more tools"><Menu size={18}/><span>More</span></button>
     </nav>
 
+    <CommandPalette open={commandOpen} query={commandQuery} setQuery={setCommandQuery} entries={guidedSearch} decisions={guidedDecisions} onClose={() => setCommandOpen(false)} onNavigate={navigate} onSetting={focusSetupSetting} onScope={(id, choice) => setScopeExplicitly([id], choice)} onApplyDecision={applyGuidedDecision}/>
     {detail && <PatternDetail pattern={detail} selected={activeProject.selected.includes(detail.id)} toggle={() => togglePattern(detail.id)} close={() => setDetail(null)} copy={copy} learningMode={learningMode} related={allPatterns} openRelated={setDetail} removeCustom={'custom' in detail && detail.custom ? () => removeCustomPattern(detail.id) : undefined}/>} 
     {showCustomCapability && <CustomCapabilityModal close={() => setShowCustomCapability(false)} add={addCustomCapability}/>} 
     {showCustom && <CustomPatternModal close={() => setShowCustom(false)} add={addCustomPattern}/>} 
     {showReference && <ReferenceModal close={() => setShowReference(false)} add={addReference}/>} 
     {showProjectCreate && <ProjectModal close={() => setShowProjectCreate(false)} create={createProject}/>} 
     {toast && <div className="toast"><Check size={14}/>{toast}</div>}
-  </div>
+  </div></GuidanceProvider>
 }
 
-function PageHeader({ eyebrow, title, copy, action }: { eyebrow: string; title: string; copy: string; action?: React.ReactNode }) {
-  return <header className="page-header"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{copy}</p></div>{action}</header>
+function PageHeader({ eyebrow, title, copy, tldr, action }: { eyebrow: string; title: string; copy: string; tldr?: string; action?: React.ReactNode }) {
+  const { tldrMode } = useGuidanceMode()
+  return <header className={`page-header ${tldrMode ? 'page-header-tldr' : ''}`}><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{tldrMode && tldr ? tldr : copy}</p>{tldrMode && tldr && <span className="page-tldr-chip">TL;DR · essentials only</span>}</div>{action}</header>
+}
+
+function CommandPalette({ open, query, setQuery, entries, decisions, onClose, onNavigate, onSetting, onScope, onApplyDecision }: {
+  open: boolean
+  query: string
+  setQuery: (value: string) => void
+  entries: ReturnType<typeof guidedSearchEntries>
+  decisions: GuidedDecision[]
+  onClose: () => void
+  onNavigate: (view: View) => void
+  onSetting: (id: string) => void
+  onScope: (id: string, choice: 'On' | 'Off') => void
+  onApplyDecision: (decision: GuidedDecision) => void
+}) {
+  if (!open) return null
+  const normalized = query.trim().toLowerCase()
+  const pages: { id: View; label: string; description: string; keywords: string }[] = [
+    { id: 'home', label: 'Home', description: 'What needs attention and what to do next.', keywords: 'workspace start attention next progress' },
+    { id: 'setup', label: 'Setup', description: 'Product scope and behavior. Guided first, full settings on demand.', keywords: 'features scope booking payments auth settings' },
+    { id: 'dna', label: 'Design', description: 'Visual direction and advanced visual controls.', keywords: 'visual design typography colors motion dna' },
+    { id: 'preview', label: 'Preview', description: 'Compare, refine, and approve the live visual direction.', keywords: 'preview mobile desktop approve visual' },
+    { id: 'spec', label: 'Review & build', description: 'Final implementation contract, exports, and readiness.', keywords: 'spec prompt build export implementation' },
+    { id: 'flows', label: 'Core flows', description: 'Optional workflow contracts for important journeys.', keywords: 'workflow journey user flow' },
+    { id: 'patterns', label: 'Pattern explorer', description: 'Recommended visual patterns and alternatives.', keywords: 'pattern explorer design recommendations' },
+    { id: 'capabilities', label: 'Product capabilities', description: 'Advanced reusable engineering concepts.', keywords: 'capability engineering module' },
+    { id: 'roadmap', label: 'Implementation roadmap', description: 'Derived build order; no additional configuration.', keywords: 'roadmap phases implementation order' },
+    { id: 'docs', label: 'Project docs', description: 'Choose repository guidance and handoff documents.', keywords: 'docs readme architecture devops ui ux handoff' },
+    { id: 'references', label: 'References', description: 'Attach specific inspiration and implementation references.', keywords: 'references links images source inspiration' },
+    { id: 'inspiration', label: 'Inspiration', description: 'Browse broader visual inspiration.', keywords: 'inspiration gallery ideas design' },
+    { id: 'compare', label: 'Compare patterns', description: 'Compare selected visual patterns side by side.', keywords: 'compare patterns side by side' },
+  ]
+  const pageMatches = pages.filter((item) => guidedSearchMatches(query, `${item.label} ${item.description} ${item.keywords}`)).slice(0, 5)
+  const settingMatches = entries.filter((item) => guidedSearchMatches(query, `${item.label} ${item.sectionLabel} ${item.description} ${item.keywords}`)).slice(0, normalized ? 10 : 5)
+  const attention = guidedUnresolvedDecisions(decisions).slice(0, 4)
+
+  return <div className="modal-wrap command-wrap" onMouseDown={onClose}>
+    <section className="command-palette" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Find anything in Blueprint">
+      <div className="command-search"><Search size={19}/><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key !== 'Enter') return; event.preventDefault(); if (!normalized && attention[0]) onApplyDecision(attention[0]); else if (settingMatches[0]) onSetting(settingMatches[0].settingId); else if (pageMatches[0]) onNavigate(pageMatches[0].id) }} placeholder="Try “booking”, “password”, “mobile nav”, “payments”…"/><kbd>Esc</kbd></div>
+      <div className="command-help"><span>Search includes hidden, inactive, Standard, and Advanced settings.</span><span><kbd>Ctrl K</kbd> anywhere</span></div>
+      <div className="command-results">
+        {!normalized && attention.length > 0 && <section><div className="command-section-title">Needs your attention</div>{attention.map((decision) => <div className={`command-attention priority-${decision.priority}`} key={decision.id}><AlertTriangle size={15}/><button className="command-attention-copy" onClick={() => decision.settingIds[0] ? onSetting(decision.settingIds[0]) : onNavigate('setup')}><strong>{decision.title}</strong><small>{decision.impact}</small></button>{decision.actionableSettingIds.length > 0 || decision.suggestedFixId ? <button className="command-scope-action" onClick={() => onApplyDecision(decision)}>{decision.suggestedFixId ? 'Apply fix' : 'Include'}</button> : <ChevronRight size={14}/>}</div>)}</section>}
+        {pageMatches.length > 0 && <section><div className="command-section-title">Go to</div>{pageMatches.map((item) => <button className="command-result" key={item.id} onClick={() => onNavigate(item.id)}><span className="command-result-icon">{item.id === 'home' ? <Home size={15}/> : item.id === 'setup' ? <Settings2 size={15}/> : item.id === 'preview' ? <Eye size={15}/> : item.id === 'spec' ? <ClipboardList size={15}/> : <ArrowRight size={15}/>}</span><span><strong>{item.label}</strong><small>{item.description}</small></span><ChevronRight size={14}/></button>)}</section>}
+        {settingMatches.length > 0 && <section><div className="command-section-title">Settings</div>{settingMatches.map((item) => <div className="command-setting" key={item.settingId}><button onClick={() => onSetting(item.settingId)}><span><strong>{item.label}</strong><small>{item.sectionLabel} · {item.description}</small></span><em>{item.currentValue}</em></button>{item.scope && item.scopeState !== 'on' && item.scopeState !== 'required' && <button className="command-scope-action" onClick={() => onScope(item.settingId, 'On')}>Include</button>}</div>)}</section>}
+        {normalized && !pageMatches.length && !settingMatches.length && <div className="command-empty"><Search size={20}/><strong>No close match yet.</strong><p>Try a plain-language feature name. Blueprint searches labels, descriptions, sections, keywords, option text, and common one- or two-character typos.</p></div>}
+      </div>
+    </section>
+  </div>
 }
 
 function SaveStatus({ status, compact = false, onRetry }: { status: SaveState; compact?: boolean; onRetry?: () => void }) {
@@ -1647,7 +1812,7 @@ function SaveStatus({ status, compact = false, onRetry }: { status: SaveState; c
   </div>
 }
 
-function SetupView({ project, updateProject, notify, presets, savePreset, applyPreset, deletePreset, setView }: {
+function SetupView({ project, updateProject, notify, presets, savePreset, applyPreset, deletePreset, setView, focusSettingId, onFocusHandled, openFinder }: {
   project: Project
   updateProject: (patch: Partial<Project> | ((project: Project) => Partial<Project>)) => void
   notify: (message: string) => void
@@ -1656,9 +1821,13 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   applyPreset: (preset: ConfigPreset) => void
   deletePreset: (id: string) => void
   setView: (view: View) => void
+  focusSettingId?: string
+  onFocusHandled?: () => void
+  openFinder: () => void
 }) {
   const config = normalizeProjectConfig(project.config)
   const [search, setSearch] = useState('')
+  const [showFullSettings, setShowFullSettings] = useState(false)
   const [configDepth, setConfigDepth] = useState<ConfigDepth>(() => {
     try {
       const saved = window.localStorage.getItem('blueprint-setup-depth')
@@ -1679,9 +1848,24 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   useEffect(() => {
     if (config.profile !== 'Recommended' || config.operationalScale !== 'Auto') setShowRecommendationTuning(true)
   }, [config.profile, config.operationalScale])
+  useEffect(() => {
+    if (!focusSettingId) return
+    const setting = configSettings.find((item) => item.id === focusSettingId)
+    if (!setting) return
+    setShowFullSettings(true)
+    setSearch(setting.label)
+    setOpenSections((current) => current.includes(setting.section) ? current : [...current, setting.section])
+    window.requestAnimationFrame(() => window.setTimeout(() => document.getElementById(`setup-setting-${setting.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60))
+    onFocusHandled?.()
+  }, [focusSettingId, onFocusHandled])
   const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
   const contextDecisions = contextGapDecisions(project.context, config)
+  const guidedDecisions = guidedSetupDecisions(project.context, config)
+  const attentionDecisions = guidedUnresolvedDecisions(guidedDecisions)
+  const setupContextAnswered = projectContextEntries(project.context).length
+  const goalCriticalDecisions = attentionDecisions.filter((item) => item.priority === 'required')
+  const guidedScopeIds = recommendedScopeIds(guidedDecisions)
   const setupIncompleteSignal = contextSignals.find((signal) => signal.id === 'context-recommended-setup-incomplete')
   const readiness = configReadiness(config)
   const typeMatches = appTypeMatches(config)
@@ -1695,19 +1879,21 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   const normalizedQuery = search.trim().toLowerCase()
   const setConfig = (next: ProjectConfig) => updateProject({ config: next })
   const applyAction = (action: ConfigAction) => {
-    let next = config
-    for (const change of action.changes) {
-      const setting = configSettings.find((item) => item.id === change.id)
-      if (setting && isScopeSetting(change.id)) {
-        if (setting.kind === 'boolean') next = setScopeChoice(next, change.id, change.value === true ? 'On' : 'Off')
-        else {
-          next = setScopeChoice(next, change.id, 'On')
-          next = setConfigValue(next, change.id, change.value)
-        }
-      } else next = setConfigValue(next, change.id, change.value)
-    }
-    setConfig(next)
+    setConfig(configWithAction(config, action))
     notify(action.title)
+  }
+
+  const setGuidedScope = (ids: string[], choice: 'On' | 'Off') => {
+    let next = config
+    const scopeIds = Array.from(new Set(ids.filter((id) => isScopeSetting(id))))
+    scopeIds.forEach((id) => { next = setScopeChoice(next, id, choice) })
+    setConfig(next)
+    notify(choice === 'On' ? `${scopeIds.length} recommended scope decision${scopeIds.length === 1 ? '' : 's'} included` : `${scopeIds.length} recommendation${scopeIds.length === 1 ? '' : 's'} marked not needed`)
+  }
+
+  const applyRecommendedSetup = () => {
+    if (!guidedScopeIds.length) return
+    setGuidedScope(guidedScopeIds, 'On')
   }
 
   const changeAppType = (appType: AppType) => {
@@ -1744,7 +1930,7 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
     if (!normalizedQuery) return true
     const section = configSections.find((item) => item.id === setting.section)
     const haystack = [section?.label, setting.group, setting.label, setting.description, setting.caution, ...(setting.keywords ?? []), ...(setting.options ?? []).map((option) => `${option.label || option.value} ${option.note || ''}`)].filter(Boolean).join(' ').toLowerCase()
-    return haystack.includes(normalizedQuery)
+    return guidedSearchMatches(search, haystack)
   })
 
   const relevantSections = configSections.filter((section) => matchingSettings(section.id).length > 0)
@@ -1757,38 +1943,55 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   const activeIntegrationFamilies = configSettings.filter((setting) => setting.section === 'integrations' && setting.kind === 'boolean' && isScopeSetting(setting.id) && resolveScope(config, setting.id).active).map((setting) => setting.label)
 
   return <>
-    <PageHeader eyebrow="App setup" title="Start recommended. Change only what matters." copy="Blueprint already fills sensible defaults for the app type. You do not need to answer every setting—use this screen mainly to describe exceptions and important behavior." action={<button className="secondary-button" onClick={() => { if (window.confirm('Reset every app-setup choice to the current recommended defaults?')) { setConfig(resetAllConfig(config)); notify('App setup reset to recommended') } }}><RefreshCw size={15}/> Reset recommended</button>}/>
+    <PageHeader eyebrow="Guided setup" title="Tell Blueprint what you need. It will find the switches." copy="Describe the product in plain language and review only the important decisions Blueprint surfaces. The full settings library is still here when you want exact control." tldr="Describe the product, resolve anything marked Required or Recommended, then continue. Open the full settings library only when you need exact control." action={<div className="header-actions"><button className="secondary-button" onClick={openFinder}><Search size={15}/> Find anything</button><button className="secondary-button" onClick={() => { if (window.confirm('Reset every app-setup choice to the current recommended defaults?')) { setConfig(resetAllConfig(config)); notify('App setup reset to recommended') } }}><RefreshCw size={15}/> Reset recommended</button></div>}/>
+
+    <section className="visual-cue-path" aria-label="Guided setup path">
+      <div className={setupContextAnswered ? 'done' : 'current'}><i>{setupContextAnswered ? <Check size={13}/> : '1'}</i><span><strong>Describe</strong><small>Say what you are building</small></span></div>
+      <ArrowRight size={15}/>
+      <div className={!attentionDecisions.length ? 'done' : setupContextAnswered ? 'current' : ''}><i>{!attentionDecisions.length ? <Check size={13}/> : '2'}</i><span><strong>Resolve</strong><small>Review surfaced decisions</small></span></div>
+      <ArrowRight size={15}/>
+      <div className={!attentionDecisions.length ? 'current optional' : 'optional'}><i>3</i><span><strong>Tune if needed</strong><small>Advanced controls are optional</small></span></div>
+    </section>
 
     <section className="setup-context">
       <div className="setup-context-main">
         <label><span>App type</span><select value={config.appType} onChange={(event) => changeAppType(event.target.value as AppType)}>{appTypes.map((item) => <option key={item.value} value={item.value}>{item.value}</option>)}</select><small>{appTypes.find((item) => item.value === config.appType)?.description}</small></label>
         <div className="setup-baseline">
-          <div><span>Smart baseline</span><strong>{config.profile} · {config.operationalScale === 'Auto' ? `Auto → ${resolvedOperationalScale(config)}` : resolvedOperationalScale(config)}</strong><small>Blueprint uses this only to size recommendations. Your explicit scope and custom choices still win.</small></div>
+          <div><span className="concept-label">Smart baseline <ConceptInfo label="Smart baseline">The starting recommendation Blueprint derives from app type, posture, and expected scale. It can suggest defaults, but it cannot override explicit Include / Exclude choices.</ConceptInfo></span><strong>{config.profile} · {config.operationalScale === 'Auto' ? `Auto → ${resolvedOperationalScale(config)}` : resolvedOperationalScale(config)}</strong><small>Blueprint uses this only to size recommendations. Your explicit scope and custom choices still win.</small></div>
           <button className="text-button" onClick={() => setShowRecommendationTuning((value) => !value)}>{showRecommendationTuning ? 'Hide tuning' : 'Tune recommendations'} <ChevronDown size={13} className={showRecommendationTuning ? 'rotate-180' : ''}/></button>
         </div>
         {showRecommendationTuning && <div className="setup-tuning">
           <div className="setup-profile"><span>Recommendation posture</span><small>Usually leave this on Recommended. It changes default strictness, not feature scope.</small><div>{configProfiles.map((profile) => <button key={profile.value} className={config.profile === profile.value ? 'active' : ''} onClick={() => changeProfile(profile.value)}><strong>{profile.value}</strong><small>{profile.value === 'Recommended' ? 'Best default' : profile.description}</small></button>)}</div></div>
-          <div className="setup-scale"><div className="setup-depth-heading"><span>Operational scale</span><small>Use Auto unless traffic, recovery, or operational criticality clearly justifies another level.</small></div><div>{operationalScales.map((scale) => <button key={scale.value} className={config.operationalScale === scale.value ? 'active' : ''} onClick={() => changeOperationalScale(scale.value)}><strong>{scale.label}</strong><small>{scale.value === 'Auto' ? `Recommended · resolves to ${resolvedOperationalScale(config)}` : scale.description}</small></button>)}</div></div>
+          <div className="setup-scale"><div className="setup-depth-heading"><span className="concept-label">Operational scale <ConceptInfo label="Operational scale">A sizing signal for reliability, observability, recovery, and operational safeguards. It does not turn product features on.</ConceptInfo></span><small>Use Auto unless traffic, recovery, or operational criticality clearly justifies another level.</small></div><div>{operationalScales.map((scale) => <button key={scale.value} className={config.operationalScale === scale.value ? 'active' : ''} onClick={() => changeOperationalScale(scale.value)}><strong>{scale.label}</strong><small>{scale.value === 'Auto' ? `Recommended · resolves to ${resolvedOperationalScale(config)}` : scale.description}</small></button>)}</div></div>
         </div>}
-        <div className="setup-depth"><div className="setup-depth-heading"><span>How much detail do you want to review?</span><small>This changes presentation only. Search can still reach every setting.</small></div><div>{configDepths.map((depth) => <button key={depth.value} className={configDepth === depth.value ? 'active' : ''} onClick={() => setConfigDepth(depth.value)}><strong>{depth.label}</strong><small>{depth.description}</small></button>)}</div></div>
+        {showFullSettings && <div className="setup-depth"><div className="setup-depth-heading"><span>How much detail do you want to review?</span><small>This changes presentation only. Search can still reach every setting.</small></div><div>{configDepths.map((depth) => <button key={depth.value} className={configDepth === depth.value ? 'active' : ''} onClick={() => setConfigDepth(depth.value)}><strong>{depth.label}</strong><small>{depth.description}</small></button>)}</div></div>}
       </div>
-      <aside className={`setup-status ${setupIncompleteSignal ? 'setup-status-incomplete' : ''}`}><div className="setup-ready"><Gauge size={17}/><div><span>Blueprint readiness</span><strong>{setupIncompleteSignal ? 'Recommended setup incomplete' : readiness.label}</strong><p>{setupIncompleteSignal ? 'Your Project Context describes a clear public-site outcome that current active scope cannot reasonably deliver. Review the recommended scope before implementation; nothing has been activated automatically.' : readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''} · fix before implementation handoff.` : readiness.important ? `${readiness.important} important signal${readiness.important > 1 ? 's' : ''} · deliberate review required.` : readiness.review || readiness.advisory ? `${readiness.review + readiness.advisory} lower-severity review signal${readiness.review + readiness.advisory > 1 ? 's' : ''}.` : 'No App Setup review signals.'} <span>{readiness.score}% coherence indicator · {readiness.coverage}% contract coverage.</span></p></div></div><div className="setup-stat-row"><div><strong>{visibleDecisionCount}</strong><span>available in {configDepth.toLowerCase()}</span></div><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{reviewSignals.length + contextSignals.length}</strong><span>review signals</span></div></div></aside>
+      <aside className={`setup-status ${goalCriticalDecisions.length || setupIncompleteSignal ? 'setup-status-incomplete' : ''}`}><div className="setup-ready"><Gauge size={17}/><div><span>Setup status</span><strong>{goalCriticalDecisions.length ? 'Setup needs attention' : attentionDecisions.length ? 'Review recommended setup' : setupIncompleteSignal ? 'Recommended setup incomplete' : readiness.label}</strong><p>{goalCriticalDecisions.length ? `${goalCriticalDecisions[0].title}. ${goalCriticalDecisions[0].impact} ${goalCriticalDecisions[0].source === 'project_context' && goalCriticalDecisions[0].actionableSettingIds.length ? 'Blueprint will never include that scope without your click.' : 'Resolve this deliberately before implementation handoff.'}` : attentionDecisions.length ? `${attentionDecisions.length} setup decision${attentionDecisions.length === 1 ? '' : 's'} still deserve deliberate review.` : setupIncompleteSignal ? 'Your Project Context describes an outcome that current active scope cannot reasonably deliver. Review the recommendation below; nothing has been activated automatically.' : readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''} · fix before implementation handoff.` : readiness.important ? `${readiness.important} important signal${readiness.important > 1 ? 's' : ''} · deliberate review required.` : readiness.review || readiness.advisory ? `${readiness.review + readiness.advisory} lower-severity review signal${readiness.review + readiness.advisory > 1 ? 's' : ''}.` : 'The important setup is covered. You do not need to browse every setting.'}</p></div></div><div className="setup-stat-row"><div><strong>{attentionDecisions.length}</strong><span>need attention</span></div><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{activeBusinessPacks.length}</strong><span>active business packs</span></div></div></aside>
     </section>
 
     <ProjectContextPanel project={project} updateProject={updateProject}/>
 
-    {contextSignals.length > 0 && <section className={`context-review-signals ${setupIncompleteSignal ? 'has-important-context' : ''}`}><Lightbulb size={18}/><div><strong>{setupIncompleteSignal ? 'Recommended setup incomplete · review required' : 'Project Context review · suggestion only'}</strong><p>These signals do not change App Setup. They only flag possible mismatches between your human description and deterministic structured scope.</p>{contextSignals.map((signal) => <div className={`context-review-row ${signal.severity === 'important' ? 'important' : ''}`} key={signal.id}><div><strong>{signal.title}</strong><span>{signal.detail}</span></div><button className="text-button" onClick={() => jumpToSection(signal.targetSection)}>Review scope <ArrowRight size={13}/></button></div>)}</div></section>}
+    <section className="guided-setup-center">
+      <div className="guided-setup-head"><div><div className="eyebrow"><WandSparkles size={13}/> Guided setup <ConceptInfo label="Guided setup">Blueprint surfaces only unresolved required, recommended, or blocker-level choices here so you do not have to browse hundreds of settings.</ConceptInfo></div><h2>{attentionDecisions.length ? `${attentionDecisions.length} decision${attentionDecisions.length === 1 ? '' : 's'} need your attention` : 'The important setup is covered'}</h2><p>Blueprint brings required, recommended, and blocker-level choices to you. You should not need to know which section, pack, or one of the 918 settings contains them.</p></div><div className="guided-setup-head-actions"><button className="secondary-button" onClick={openFinder}><Search size={14}/> Find anything</button>{guidedScopeIds.length > 0 && <button className="primary-button" onClick={applyRecommendedSetup}><Sparkles size={14}/> Apply recommended setup</button>}</div></div>
+      {attentionDecisions.length > 0 ? <div className="guided-setup-list">{attentionDecisions.slice(0, 6).map((decision) => <article key={decision.id} className={`guided-setup-item priority-${decision.priority}`}>
+        <div className="guided-decision-status">{decision.priority === 'required' ? <AlertTriangle size={17}/> : <Lightbulb size={17}/>}</div>
+        <div><span>{decision.priority === 'required' ? 'Required for your stated goal' : decision.priority === 'recommended' ? 'Recommended' : 'Needs review'}</span><h3>{decision.title}</h3><p>{decision.impact}</p><details><summary>Why? What does this affect?</summary><p>{decision.why}</p><small>{decision.detail}</small></details></div>
+        <div className="guided-decision-actions">{decision.suggestedFixId && configQuickFixById(config, decision.suggestedFixId) && <button className="primary-button compact-button" onClick={() => { const fix = configQuickFixById(config, decision.suggestedFixId!); if (fix) applyAction(fix) }}>Apply fix</button>}{decision.actionableSettingIds.length > 0 && <button className="primary-button compact-button" onClick={() => setGuidedScope(decision.actionableSettingIds, 'On')}>Include</button>}<button className="text-button" onClick={() => { const id = decision.settingIds[0]; if (id) { setShowFullSettings(true); setSearch(configSettings.find((item) => item.id === id)?.label ?? ''); const setting = configSettings.find((item) => item.id === id); if (setting) setOpenSections((current) => current.includes(setting.section) ? current : [...current, setting.section]); window.requestAnimationFrame(() => window.setTimeout(() => document.getElementById(`setup-setting-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60)) } else setShowFullSettings(true) }}>Review details <ArrowRight size={12}/></button>{decision.actionableSettingIds.length > 0 && <button className="quiet-button" onClick={() => setGuidedScope(decision.settingIds.filter((id) => isScopeSetting(id) && !resolveScope(config, id).active), 'Off')}>Not needed</button>}</div>
+      </article>)}</div> : <div className="guided-all-clear compact"><CircleCheckBig size={20}/><div><strong>No unresolved guided setup decision remains.</strong><p>You can continue without opening the full settings library. Blueprint will surface important blockers, recommendations, or context mismatches here if your setup changes.</p></div></div>}
+      <div className="guided-setup-foot"><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{activeBusinessPacks.length || 0}</strong><span>active business packs</span></div><div><strong>{reviewSignals.filter((item) => item.severity === 'blocker' || item.severity === 'important').length}</strong><span>important setup signals</span></div><button className="advanced-settings-toggle" onClick={() => setShowFullSettings((value) => !value)}><Settings2 size={15}/><span><strong>{showFullSettings ? 'Hide full settings' : 'Browse all settings'}</strong><small>{showFullSettings ? 'Return to guided setup' : 'Power-user controls, section browser, presets, and exact values'}</small></span><ChevronDown size={14} className={showFullSettings ? 'rotate-180' : ''}/></button></div>
+    </section>
 
-    {contextDecisions.length > 0 && <section className="context-gap-decisions"><div className="eyebrow">Context-aware gap filling · {String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}</div><p>Low-risk presentation/detail decisions carry <code>context_completion</code> provenance. Items held for scope are not implementation instructions until the relevant public surface is explicitly included.</p><div>{contextDecisions.slice(0, 5).map((decision) => <article key={decision.id} className={decision.status}><span>{decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · {decision.confidence}</span><strong>{decision.decision}</strong><small>{decision.reason}</small></article>)}</div></section>}
+    {showFullSettings && <>
+    {contextDecisions.length > 0 && <section className="context-gap-decisions"><div className="eyebrow">Context-aware gap filling <ConceptInfo label="Context-aware gap filling">Uses your written Project Context to complete low-risk presentation details. Anything that would create functional scope stays held until you explicitly include it.</ConceptInfo> · {String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}</div><p>Low-risk presentation/detail decisions carry <code>context_completion</code> provenance. Items held for scope are not implementation instructions until the relevant public surface is explicitly included.</p><div>{contextDecisions.slice(0, 5).map((decision) => <article key={decision.id} className={decision.status}><span>{decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · {decision.confidence}</span><strong>{decision.decision}</strong><small>{decision.reason}</small></article>)}</div></section>}
 
     <section className="setup-intelligence" aria-label="Blueprint intelligence review">
       <div className="intelligence-card readiness-card">
-        <div className="intelligence-head"><div><Gauge size={15}/><span>Readiness</span></div><strong>{readiness.label}</strong></div>
+        <div className="intelligence-head"><div><Gauge size={15}/><span className="concept-label">Readiness <ConceptInfo label="Readiness coherence indicator">A consistency signal across active setup decisions. Severity—not the percentage—decides whether the build is blocked.</ConceptInfo></span></div><strong>{readiness.label}</strong></div>
         <div className="readiness-dimensions">{readiness.dimensions.map((item) => <div key={item.label}><span>{item.label}</span><i><b style={{ width: `${item.score}%` }}/></i><small>{item.note}</small></div>)}</div>
         <p>{readiness.score}% coherence indicator. Severity drives status; the percentage is secondary and is not a completion meter.</p>
       </div>
       {(config.appType === 'Custom / General' || alternateTypeMatches.length > 0) ? <div className="intelligence-card fit-card">
-        <div className="intelligence-head"><div><Compass size={15}/><span>App-type fit</span></div><small>Only shown when useful</small></div>
+        <div className="intelligence-head"><div><Compass size={15}/><span className="concept-label">App-type fit <ConceptInfo label="App-type fit">Checks whether your deliberate setup choices resemble another built-in starting type. Switching the base preserves your custom choices.</ConceptInfo></span></div><small>Only shown when useful</small></div>
         <div className="fit-list">{typeMatches.map((match) => <div key={match.appType}><div><strong>{match.appType}</strong><span>{match.reason}</span></div><b>{match.score}%</b>{config.appType !== match.appType && (config.appType === 'Custom / General' || match.score >= 88) && <button onClick={() => changeAppType(match.appType)}>Use base</button>}</div>)}{!typeMatches.length && <p className="intelligence-empty">Neutral by design. Customize a product-shape or business-pack decision and Blueprint can suggest a closer starting type.</p>}</div>
       </div> : <div className="intelligence-card baseline-card">
         <div className="intelligence-head"><div><Sparkles size={15}/><span>Resolved baseline</span></div><small>No competing app type detected</small></div>
@@ -1827,7 +2030,8 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
       </div>
     </div>
 
-    <div className="setup-note"><Sparkles size={16}/><p><strong>{configDepth} configuration depth.</strong> Operational scale is <strong>{resolvedOperationalScale(config)}{config.operationalScale === 'Auto' ? ' (Auto)' : ''}</strong>; it tunes engineering/operations proportionality without creating product features. Blueprint resolves <strong>{activeDecisionCount}</strong> active contract decisions from the 918-setting knowledge base, but this view only asks you to review the level of detail you chose. <strong>{hiddenByDepthCount}</strong> deeper active decision{hiddenByDepthCount === 1 ? ' is' : 's are'} currently handled by implementation defaults inside active scope. Search ignores the depth filter, so an advanced setting is always one search away. Explicit On/Off still wins; required dependencies and valid child choices are inferred automatically. {activeBusinessPacks.length ? <> Active business packs: <strong>{activeBusinessPacks.join(', ')}</strong>.</> : <> No business pack is forced for this project.</>} {activeIntegrationFamilies.length ? <> Connected-service families currently enabled: <strong>{activeIntegrationFamilies.join(', ')}</strong>.</> : <> External channels and AI remain opt-in until the project actually needs them.</>}</p></div>
+    <TldrSummary><strong>{configDepth} view:</strong> {activeDecisionCount} active decisions are resolved; {hiddenByDepthCount} deeper decisions stay on safe defaults. Search can still reach everything. Explicit Include / Exclude always wins.</TldrSummary>
+    <VerboseOnly><div className="setup-note"><Sparkles size={16}/><p><strong>{configDepth} configuration depth.</strong> Operational scale is <strong>{resolvedOperationalScale(config)}{config.operationalScale === 'Auto' ? ' (Auto)' : ''}</strong>; it tunes engineering/operations proportionality without creating product features. Blueprint resolves <strong>{activeDecisionCount}</strong> active contract decisions from the 918-setting knowledge base, but this view only asks you to review the level of detail you chose. <strong>{hiddenByDepthCount}</strong> deeper active decision{hiddenByDepthCount === 1 ? ' is' : 's are'} currently handled by implementation defaults inside active scope. Search ignores the depth filter, so an advanced setting is always one search away. Explicit On/Off still wins; required dependencies and valid child choices are inferred automatically. {activeBusinessPacks.length ? <> Active business packs: <strong>{activeBusinessPacks.join(', ')}</strong>.</> : <> No business pack is forced for this project.</>} {activeIntegrationFamilies.length ? <> Connected-service families currently enabled: <strong>{activeIntegrationFamilies.join(', ')}</strong>.</> : <> External channels and AI remain opt-in until the project actually needs them.</>}</p></div></VerboseOnly>
 
     {hiddenOverrideCount > 0 && <div className="setup-note setup-inactive-note"><History size={16}/><p><strong>{hiddenOverrideCount} customized choice{hiddenOverrideCount > 1 ? 's are' : ' is'} currently inactive.</strong> Blueprint is preserving {hiddenOverrideCount > 1 ? 'them' : 'it'} because a parent feature is off or no longer relevant. Re-enable the parent and your choice returns automatically.</p></div>}
     {customizedHiddenByDepthCount > 0 && !normalizedQuery && !customOnly && <div className="setup-note setup-depth-note"><Settings2 size={16}/><p><strong>{customizedHiddenByDepthCount} customized active choice{customizedHiddenByDepthCount > 1 ? 's are' : ' is'} hidden by {configDepth} view.</strong> Nothing was reset. Switch to a deeper level, use <strong>Show customized</strong>, or search for the setting to edit it directly.</p></div>}
@@ -1873,8 +2077,9 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
                 const selectedNote = options.find((option) => option.value === effectiveValue)?.note
                 const guidance = settingGuidance(setting, config)
                 const provenance = settingRecommendationProvenance(setting, config)
-                return <div className={`setup-setting ${customized ? 'customized' : ''} ${scope ? 'scope-setting' : ''}`} key={setting.id}>
-                  <div className="setup-setting-copy"><div><strong>{setting.label}</strong><span className={`guidance-badge guidance-${guidance.toLowerCase().replace(/\s+/g, '-')}`}>{guidance}</span>{normalizedQuery && <span className={`depth-badge depth-${settingDepth(setting).toLowerCase()}`}>{settingDepth(setting)}</span>}{customized && <span className="custom-badge">{deliberateScope ? 'Explicit scope' : 'Customized'}</span>}</div><p>{setting.description}</p>{scope ? <small className="scope-explanation"><b>{scope.state === 'on' ? 'Selected' : scope.state === 'required' ? 'Required' : scope.state === 'suggested' ? 'Suggested' : 'Not included'}</b> · {scope.reason}</small> : <small className="recommendation-why" title={`Recommended: ${formatConfigValue(expected)}`}><b>{provenance.source}</b> · {provenance.reason}</small>}{setting.caution && customized && <em>{setting.caution}</em>}</div>
+                const needsExplainer = settingDepth(setting) !== 'Quick' || /\b(CSP|WCAG|CI\/CD|webhook|passkey|RPO|RTO|RBAC|SSO|SLA|TTL|idempot|tenant|CSRF|CORS|OAuth|observability|rate limit)\b/i.test(`${setting.label} ${setting.description}`)
+                return <div id={`setup-setting-${setting.id}`} className={`setup-setting ${customized ? 'customized' : ''} ${scope ? 'scope-setting' : ''}`} key={setting.id}>
+                  <div className="setup-setting-copy"><div><strong>{setting.label}</strong>{needsExplainer && <ConceptInfo label={setting.label}>{setting.description}{setting.caution ? <> <b>Watch for:</b> {setting.caution}</> : null}</ConceptInfo>}<span className={`guidance-badge guidance-${guidance.toLowerCase().replace(/\s+/g, '-')}`}>{guidance}</span>{normalizedQuery && <span className={`depth-badge depth-${settingDepth(setting).toLowerCase()}`}>{settingDepth(setting)}</span>}{customized && <span className="custom-badge">{deliberateScope ? 'Explicit scope' : 'Customized'}</span>}</div><p>{setting.description}</p>{scope ? <small className="scope-explanation"><b>{scope.state === 'on' ? 'Selected' : scope.state === 'required' ? 'Required' : scope.state === 'suggested' ? 'Suggested' : 'Not included'}</b> · {scope.reason}</small> : <small className="recommendation-why" title={`Recommended: ${formatConfigValue(expected)}`}><b>{provenance.source}</b> · {provenance.reason}</small>}{setting.caution && customized && <em>{setting.caution}</em>}</div>
                   <div className="setup-setting-control">
                     {scope ? <>
                       <div className="scope-control" aria-label={`${setting.label} scope`}>
@@ -1898,6 +2103,8 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
     </div>
 
     {relevantSections.length === 0 && <div className="empty-panel setup-empty"><Search size={20}/><div><strong>{customOnly ? 'No customized settings match.' : 'No matching settings.'}</strong><p>{customOnly ? 'Turn off “Customized only” or change a setting first.' : 'Try a broader word. Search automatically includes Standard and Advanced settings regardless of your current depth.'}</p></div></div>}
+
+    </>}
 
     <div className="flow-next"><div><span>Next</span><strong>Shape the visual direction</strong><small>Your product scope is preserved. Visual Studio changes presentation, not feature scope.</small></div><button className="primary-button" onClick={() => setView('dna')}>Continue to Visual Studio <ArrowRight size={15}/></button></div>
   </>
@@ -1981,13 +2188,15 @@ function CoreFlowsView({ project, updateProject, notify }: {
       eyebrow="Power tool · workflow contract"
       title="Describe the few journeys the product must get right."
       copy="Core Flows capture actor → goal → main path → success → recovery. They are explicit workflow intent inside App Setup scope; adding or editing a flow never turns product scope on behind your back."
+      tldr="Define only the few journeys the product absolutely must get right. Core Flows describe sequence; they never turn features on."
       action={<button className="primary-button" onClick={addBlank}><Plus size={16}/> Add core flow</button>}
     />
 
     <section className="flow-contract-banner">
-      <div><ListChecks size={19}/><div><strong>{project.coreFlows.length ? `${completed}/${project.coreFlows.length} flows implementation-ready` : 'No core flows required to start'}</strong><p>Aim for the 2–5 journeys that define whether the product works. A good main path is usually 3–6 steps; secondary behavior belongs in failure/recovery states, acceptance criteria, or docs.</p></div></div>
+      <div><ListChecks size={19}/><div><strong className="concept-label">{project.coreFlows.length ? `${completed}/${project.coreFlows.length} flows implementation-ready` : 'No core flows required to start'} <ConceptInfo label="Core Flow">A short workflow contract for one important journey: who acts, what they want, the main path, the success state, and key recovery behavior.</ConceptInfo></strong><p>Aim for the 2–5 journeys that define whether the product works. A good main path is usually 3–6 steps; secondary behavior belongs in failure/recovery states, acceptance criteria, or docs.</p></div></div>
       <span>Flows never mutate App Setup</span>
     </section>
+    <TldrSummary>Keep only the 2–5 journeys that determine whether the product works. Main path first; recovery states only for meaningful failures.</TldrSummary>
 
     {starters.length > 0 && <section className="flow-starters">
       <div className="section-heading"><div><span className="eyebrow">Optional starters</span><h2>Use a relevant skeleton, then make it yours.</h2><p>These appear only because matching scope is already active. Nothing is added until you explicitly choose a starter.</p></div></div>
@@ -2060,6 +2269,7 @@ function RoadmapView({ project, copy, setView }: { project: Project; copy: (valu
       eyebrow="Power tool · derived delivery plan"
       title="Build in the order the product actually depends on."
       copy="Blueprint derives this implementation roadmap from resolved App Setup and your authored Core Flows. There is nothing new to configure here: when scope or flows change, the roadmap changes with them."
+      tldr="This is the recommended build order derived from your current scope and flows. You do not configure anything here."
       action={<button className="primary-button" onClick={() => copy(implementationRoadmapMarkdown(roadmap, 2), 'Implementation roadmap copied')}><Copy size={16}/> Copy roadmap</button>}
     />
 
@@ -2069,8 +2279,9 @@ function RoadmapView({ project, copy, setView }: { project: Project; copy: (valu
     </section>
 
     <section className="roadmap-principles">
-      <div className="section-heading"><div><span className="eyebrow">Roadmap contract</span><h2>Sequence is guidance. Scope is not negotiable.</h2><p>The roadmap can explain what should happen first, but it cannot authorize anything App Setup says is inactive.</p></div></div>
-      <div>{roadmap.principles.map((principle) => <p key={principle}><Check size={14}/>{principle}</p>)}</div>
+      <div className="section-heading"><div><span className="eyebrow">Roadmap contract <ConceptInfo label="Derived implementation roadmap">A build sequence generated from active App Setup plus your Core Flows. It orders work but cannot add features that scope says are off.</ConceptInfo></span><h2>Sequence is guidance. Scope is not negotiable.</h2><p>The roadmap can explain what should happen first, but it cannot authorize anything App Setup says is inactive.</p></div></div>
+      <TldrSummary>Build in dependency order. A roadmap phase can sequence active work, but it can never activate excluded scope.</TldrSummary>
+      <VerboseOnly><div>{roadmap.principles.map((principle) => <p key={principle}><Check size={14}/>{principle}</p>)}</div></VerboseOnly>
     </section>
 
     <section className="implementation-roadmap-list">{roadmap.phases.map((phase, index) => <article key={phase.id} className={`implementation-roadmap-phase ${phase.blocking ? 'blocking' : ''}`}>
@@ -2091,6 +2302,7 @@ function RoadmapView({ project, copy, setView }: { project: Project; copy: (valu
 }
 
 function ProjectContextPanel({ project, updateProject }: { project: Project; updateProject: (patch: Partial<Project> | ((project: Project) => Partial<Project>)) => void }) {
+  const { tldrMode } = useGuidanceMode()
   const [expanded, setExpanded] = useState(() => projectContextQuestions.some((question) => !question.primary && Boolean(project.context?.[question.id]?.trim())))
   const context = normalizeProjectContext(project.context)
   const answered = projectContextEntries(context).length
@@ -2098,9 +2310,9 @@ function ProjectContextPanel({ project, updateProject }: { project: Project; upd
   const updateContext = (id: keyof ProjectContext, value: string) => updateProject({ context: { ...context, [id]: value } })
 
   return <section className="project-context-card">
-    <div className="project-context-head"><div><div className="eyebrow"><ClipboardList size={13}/> Optional AI context</div><h2>Give the coding AI the human part.</h2><p>Short answers are enough. Skip anything you do not care about. Blueprint stores these words verbatim and never changes App Setup from them.</p></div><span>{answered ? `${answered}/8 answered` : 'Optional'}</span></div>
+    <div className="project-context-head"><div><div className="eyebrow"><ClipboardList size={13}/> Recommended context <ConceptInfo label="Project Context">Your own plain-language briefing. Blueprint uses it to spot missing decisions and improve exports, but structured App Setup remains the higher-authority source of scope.</ConceptInfo></div><h2>Describe what you're building in your own words.</h2><p>{tldrMode ? 'Short answers are enough. This helps Blueprint spot missing decisions; it never changes scope automatically.' : 'This is the fastest way to make important decisions find you. Short answers are enough; fill only what matters. Blueprint stores your words verbatim and never changes App Setup automatically.'}</p></div><span>{answered ? `${answered}/8 answered` : 'Recommended'}</span></div>
     <div className="project-context-grid">{visibleQuestions.map((question) => <label key={question.id}><span>{question.label}</span><textarea rows={2} value={context[question.id]} onChange={(event) => updateContext(question.id, event.target.value)} placeholder={question.placeholder}/></label>)}</div>
-    <div className="project-context-foot"><button className="text-button" onClick={() => setExpanded((value) => !value)}>{expanded ? 'Show fewer questions' : 'Add more context'} <ChevronDown size={13} className={expanded ? 'rotate-180' : ''}/></button><small>Used only as interpretive context in AI/spec exports. Structured Blueprint scope always wins.</small></div>
+    <div className="project-context-foot"><button className="text-button" onClick={() => setExpanded((value) => !value)}>{expanded ? 'Show fewer questions' : 'Add more context'} <ChevronDown size={13} className={expanded ? 'rotate-180' : ''}/></button><small>Recommended for guided detection and AI/spec exports; still lower-authority than structured App Setup, which always wins.</small></div>
   </section>
 }
 
@@ -2127,15 +2339,22 @@ function snapshotComparison(project: Project, snapshot: Snapshot) {
   return { total, configChanges, addedPatterns, removedPatterns, capabilityChanges, docChanges, dnaChanges, contextChanges, flowChanges }
 }
 
-function HomeView({ project, projects, recommendations, similarity, patternIntel, setView, updateProject, create, duplicate, remove, addSnapshot, restoreSnapshot, exportBackup, importRef, importBackup }: {
+function HomeView({ project, projects, recommendations, similarity, patternIntel, approval, decisions, guidedStatus, setView, updateProject, applyDecision, rejectDecision, openFinder, focusSetting, create, duplicate, remove, addSnapshot, restoreSnapshot, exportBackup, importRef, importBackup }: {
   project: Project
   projects: Project[]
   patterns: Pattern[]
   recommendations: ReturnType<typeof recommendPatterns>
   similarity: ReturnType<typeof similarityReport>
   patternIntel: PatternExplorerIntelligence
+  approval: 'approved' | 'stale' | 'unapproved'
+  decisions: GuidedDecision[]
+  guidedStatus: ReturnType<typeof guidedBuildStatus>
   setView: (view: View) => void
   updateProject: (patch: Partial<Project> | ((project: Project) => Partial<Project>)) => void
+  applyDecision: (decision: GuidedDecision) => void
+  rejectDecision: (decision: GuidedDecision) => void
+  openFinder: () => void
+  focusSetting: (id: string) => void
   create: () => void
   duplicate: () => void
   remove: () => void
@@ -2147,14 +2366,42 @@ function HomeView({ project, projects, recommendations, similarity, patternIntel
 }) {
   const score = patternIntel.antiHomogeneity.similarity
   const [compareCheckpointId, setCompareCheckpointId] = useState('')
+  const [showWorkspaceExtras, setShowWorkspaceExtras] = useState(false)
   const compareCheckpoint = project.snapshots.find((snapshot) => snapshot.id === compareCheckpointId)
   const checkpointDiff = compareCheckpoint ? snapshotComparison(project, compareCheckpoint) : null
   const readiness = configReadiness(normalizeProjectConfig(project.config))
   const directionPalette = project.dna.themeMode === 'Dark only' || project.dna.defaultTheme === 'Dark' ? resolvedDarkPalette(project.dna) : project.dna.palette
+  const attentionDecisions = guidedUnresolvedDecisions(decisions)
+  const acknowledgedDecisions = decisions.filter((item) => item.state === 'acknowledged')
+  const contextAnswered = projectContextEntries(project.context).length
+  const progress = [
+    { label: 'Describe', detail: contextAnswered ? `${contextAnswered} context answer${contextAnswered === 1 ? '' : 's'}` : 'Recommended first step', done: contextAnswered > 0, next: 'setup' as View },
+    { label: 'Setup', detail: guidedStatus.unresolvedTotal ? `${guidedStatus.unresolvedTotal} decision${guidedStatus.unresolvedTotal === 1 ? '' : 's'} left` : 'Goal aligned', done: guidedStatus.unresolvedTotal === 0, next: 'setup' as View },
+    { label: 'Design', detail: patternIntel.recommendations[0]?.name ?? 'Direction ready', done: true, next: 'dna' as View },
+    { label: 'Approve', detail: approval === 'approved' ? 'Approved' : approval === 'stale' ? 'Needs re-approval' : 'Not approved yet', done: approval === 'approved', next: 'preview' as View },
+    { label: 'Build', detail: guidedStatus.state === 'ready' ? 'Ready' : 'Waiting', done: guidedStatus.state === 'ready', next: 'spec' as View },
+  ]
   return <>
     <section className="workspace-head">
-      <div><div className="eyebrow"><Sparkles size={13}/> Active blueprint workspace</div><input className="workspace-title" value={project.name} onChange={(event) => updateProject({ name: event.target.value })}/><p>Choose the product shape, change only meaningful exceptions, shape the visual direction, then export one implementation-ready brief.</p></div>
+      <div><div className="eyebrow"><Sparkles size={13}/> Active blueprint workspace</div><input className="workspace-title" value={project.name} onChange={(event) => updateProject({ name: event.target.value })}/><p>Tell Blueprint what you are building. It will surface the important decisions, hide the noise, and guide you to an implementation-ready brief.</p></div>
       <div className="workspace-actions"><button className="secondary-button" onClick={create}><Plus size={15}/> New</button><button className="secondary-button" onClick={duplicate}><Copy size={15}/> Alternate</button><button className="secondary-button" onClick={addSnapshot}><Save size={15}/> Checkpoint</button></div>
+    </section>
+
+    <section className={`guided-home ${guidedStatus.state}`}>
+      <div className="guided-home-main">
+        <div className="eyebrow"><WandSparkles size={13}/> What should I do next?</div>
+        <div className="guided-home-title"><div><h2>{guidedStatus.label}</h2><p>{guidedStatus.detail}</p></div><button className="finder-button" onClick={openFinder}><Search size={15}/><span>Find anything</span><kbd>Ctrl K</kbd></button></div>
+        {attentionDecisions.length > 0 ? <div className="attention-queue">{attentionDecisions.slice(0, 4).map((decision) => <article key={decision.id} className={`attention-card priority-${decision.priority}`}>
+          <div className="attention-icon"><AlertTriangle size={17}/></div>
+          <div className="attention-copy"><div><span>{decision.priority === 'required' ? 'Required for your stated goal' : decision.priority === 'recommended' ? 'Recommended' : 'Review'}</span><h3>{decision.title}</h3></div><p>{decision.impact}</p><details><summary>Why is Blueprint showing this?</summary><p>{decision.why} {decision.detail}</p></details></div>
+          <div className="attention-actions">{(decision.suggestedFixId || decision.actionableSettingIds.length > 0) && <button className="primary-button compact-button" onClick={() => applyDecision(decision)}>{decision.suggestedFixId ? 'Apply fix' : 'Include now'}</button>}<button className="text-button" onClick={() => decision.settingIds[0] ? focusSetting(decision.settingIds[0]) : setView('setup')}>Review <ArrowRight size={12}/></button>{decision.actionableSettingIds.length > 0 && <button className="quiet-button" onClick={() => rejectDecision(decision)}>Not needed</button>}</div>
+        </article>)}</div> : <div className="guided-all-clear"><CircleCheckBig size={22}/><div><strong>No important setup decision is hiding from you.</strong><p>Blueprint will keep watching your Project Context and structured scope. If a core capability becomes obviously missing, it will appear here.</p></div></div>}
+        {acknowledgedDecisions.length > 0 && <details className="acknowledged-decisions"><summary>{acknowledgedDecisions.length} recommendation{acknowledgedDecisions.length === 1 ? '' : 's'} explicitly declined</summary><div>{acknowledgedDecisions.map((item) => <span key={item.id}>{item.title}</span>)}</div></details>}
+      </div>
+      <aside className="guided-progress">
+        <div><span>Blueprint path</span><strong>Simple first. Power on demand.</strong></div>
+        <ol>{progress.map((step, index) => <li key={step.label} className={step.done ? 'done' : ''}><button onClick={() => setView(step.next)}><i>{step.done ? <Check size={12}/> : index + 1}</i><span><strong>{step.label}</strong><small>{step.detail}</small></span><ChevronRight size={13}/></button></li>)}</ol>
+      </aside>
     </section>
 
     <section className="home-dashboard">
@@ -2171,15 +2418,16 @@ function HomeView({ project, projects, recommendations, similarity, patternIntel
       </div>
     </section>
 
-    <section className="workspace-stats workspace-stats-six">
-      <button onClick={() => setView('setup')}><span>App setup</span><strong>{readiness.label}</strong><small>{readiness.score}% coherence · {project.config.overrides.length + Object.keys(project.config.scopeChoices ?? {}).length} deliberate choices</small></button>
-      <button onClick={() => setView('patterns')}><span>Visual patterns</span><strong>{project.selected.length}</strong><small>How it looks and behaves</small></button>
-      <button onClick={() => setView('capabilities')}><span>Capabilities</span><strong>{project.capabilities.length}</strong><small>Reusable engineering concepts</small></button>
-      <button onClick={() => setView('docs')}><span>MVP docs</span><strong>{project.docs.length}</strong><small>Knowledge that ships with code</small></button>
-      <button onClick={() => setView('references')}><span>References</span><strong>{project.references.length}</strong><small>Specific ideas, not clones</small></button>
-      <button onClick={() => setView('spec')}><span>Generated spec</span><strong>{readiness.label}</strong><small>Implementation brief + typed review intelligence</small></button>
+    <section className="home-primary-links" aria-label="Primary Blueprint steps">
+      <button onClick={() => setView('setup')}><span>1 · Setup</span><strong>{guidedStatus.unresolvedTotal ? `${guidedStatus.unresolvedTotal} decision${guidedStatus.unresolvedTotal === 1 ? '' : 's'} left` : 'Goal-aligned setup'}</strong><small>What the product must actually do</small></button>
+      <button onClick={() => setView('dna')}><span>2 · Design</span><strong>{patternIntel.recommendations[0]?.name ?? project.dna.personality}</strong><small>Recommended visual direction</small></button>
+      <button onClick={() => setView('preview')}><span>3 · Preview</span><strong>{approval === 'approved' ? 'Approved' : approval === 'stale' ? 'Needs re-approval' : 'Review visually'}</strong><small>Compare, refine, and approve</small></button>
+      <button onClick={() => setView('spec')}><span>4 · Review & build</span><strong>{guidedStatus.state === 'ready' ? 'Ready to build' : 'Not ready yet'}</strong><small>Blueprint tells you what remains</small></button>
     </section>
 
+    <button className="home-extras-toggle" onClick={() => setShowWorkspaceExtras((value) => !value)}>{showWorkspaceExtras ? <ChevronUp size={13}/> : <ChevronDown size={13}/>} {showWorkspaceExtras ? 'Hide workspace tools' : 'Show workspace tools & history'}</button>
+
+    {showWorkspaceExtras && <>
     <section className="section-block">
       <div className="section-heading"><div><div className="eyebrow"><WandSparkles size={13}/> Creative suggestions</div><h2>Try something that still makes sense.</h2></div><p>Recommendations react to your Visual Studio choices, creative-stretch setting, and patterns you already used in other workspaces.</p></div>
       <div className="recommend-grid">{recommendations.slice(0, 4).map(({ pattern, reason }) => <article key={pattern.id}><PatternPreview type={pattern.preview} compact/><div><span>{pattern.category} · {pattern.level}</span><h3>{pattern.name}</h3><p>{reason}</p><button onClick={() => setView('patterns')}>Explore pattern <ArrowUpRight size={14}/></button></div></article>)}</div>
@@ -2191,6 +2439,7 @@ function HomeView({ project, projects, recommendations, similarity, patternIntel
     </section>
 
     <section className="backup-strip"><div><div className="eyebrow"><FileJson size={13}/> Portability + recovery</div><strong>Your design knowledge should not be trapped in one browser.</strong><p>Workspaces now save to IndexedDB with a last-known-good recovery copy, while reference images live as separate Blob assets. Export remains the portable safety net and includes every referenced image.</p></div><div><button className="secondary-button" onClick={exportBackup}><Download size={15}/> Export backup</button><button className="secondary-button" onClick={() => importRef.current?.click()}><Upload size={15}/> Import</button><input ref={importRef} hidden type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importBackup(file) }}/><button className="danger-link" onClick={remove}><Trash2 size={14}/> Remove workspace</button></div></section>
+    </>}
   </>
 }
 
@@ -2222,11 +2471,12 @@ function PatternsView({ patterns: allPatterns, selected, config, intelligence, a
 
   const best = intelligence.recommendations.find((item) => item.tier === 'best_match')
   return <>
-    <PageHeader eyebrow="Pattern Explorer 2.0 · v0.28" title="Recommended first. Pattern library second." copy="Blueprint now proposes a Best Match and coherent alternatives from your product context, Visual Director, hard constraints, and saved-project history. Browse the full library only when you want to override or learn." action={<div className="header-actions"><button className="secondary-button" onClick={() => { const candidates = filtered.filter((item) => !selected.includes(item.id) && item.level !== 'Familiar'); setDetail(candidates[Math.floor(Math.random() * candidates.length)] || filtered[Math.floor(Math.random() * filtered.length)] || null) }}><WandSparkles size={15}/> Surprise me</button><button className="primary-button" onClick={addCustom}><Plus size={16}/> Add discovery</button></div>}/>
+    <PageHeader eyebrow="Pattern Explorer 2.0 · v0.28" title="Recommended first. Pattern library second." copy="Blueprint now proposes a Best Match and coherent alternatives from your product context, Visual Director, hard constraints, and saved-project history. Browse the full library only when you want to override or learn." tldr="Start with Best Match. Open the full library only when you want an alternative or need to learn a pattern." action={<div className="header-actions"><button className="secondary-button" onClick={() => { const candidates = filtered.filter((item) => !selected.includes(item.id) && item.level !== 'Familiar'); setDetail(candidates[Math.floor(Math.random() * candidates.length)] || filtered[Math.floor(Math.random() * filtered.length)] || null) }}><WandSparkles size={15}/> Surprise me</button><button className="primary-button" onClick={addCustom}><Plus size={16}/> Add discovery</button></div>}/>
     <section className="pattern-intelligence">
+      <TldrSummary>Use the Best Match unless you have a clear reason to override it. Recommendations change visual direction only; they never activate functional scope.</TldrSummary>
       <div className="pattern-intelligence-head"><div><div className="eyebrow"><Sparkles size={13}/> Recommended for this project</div><h2>Choose a coherent direction, not isolated tricks.</h2><p>Recommendations are advisory until you explicitly apply one. Using a direction updates visual settings and adds only its currently compatible pattern bundle; it never turns on functional scope.</p></div>{best && <button className="primary-button" onClick={() => applyRecommended(best)}><Sparkles size={15}/> Use Recommended Direction</button>}</div>
       <div className="direction-intelligence-grid">{intelligence.recommendations.map((recommendation, index) => <article key={recommendation.id} className={`direction-intelligence-card ${recommendation.tier === 'best_match' ? 'best' : ''}`}><div className="direction-intelligence-top"><span>{recommendation.tier === 'best_match' ? 'BEST MATCH' : recommendation.tier === 'good_fit' ? 'GOOD FIT' : 'ALTERNATIVE'}</span><b>{recommendation.originality}</b></div><h3>{recommendation.name}</h3><p>{recommendation.description}</p><div className="direction-intelligence-facts"><div><span>Why it fits</span><p>{recommendation.whyItFits}</p></div><div><span>Possible drawback</span><p>{recommendation.drawback}</p></div></div><div className={`compatibility-line ${recommendation.compatibility}`}><Check size={13}/><span>{recommendation.compatibility === 'compatible' ? 'Compatible with active constraints' : 'Compatible with caveats'} · {recommendation.compatibilityNotes[0]}</span></div><div className="bundle-strip"><span>Pattern bundle</span><div>{recommendation.bundle.patterns.length ? recommendation.bundle.patterns.map((pattern) => <button key={pattern.id} onClick={() => setDetail(pattern)}>{pattern.name}</button>) : <small>No additional patterns required.</small>}</div></div><button className={recommendation.tier === 'best_match' ? 'primary-button compact' : 'secondary-button compact'} onClick={() => applyRecommended(recommendation)}>{index === 0 ? 'Use Recommended Direction' : `Use ${recommendation.name}`}</button></article>)}</div>
-      <div className={`anti-homogeneity-card risk-${intelligence.antiHomogeneity.level.toLowerCase()}`}><div><div className="eyebrow"><RefreshCw size={12}/> Anti-homogeneity</div><h3>{intelligence.antiHomogeneity.level} similarity risk{intelligence.antiHomogeneity.similarity === null ? '' : ` · ${intelligence.antiHomogeneity.similarity}%`}</h3><p>{intelligence.antiHomogeneity.summary}</p></div><div className="anti-homogeneity-columns"><div><span>Repeated traits</span>{intelligence.antiHomogeneity.repeatedTraits.length ? intelligence.antiHomogeneity.repeatedTraits.map((trait) => <p key={trait}>• {trait}</p>) : <p>• No repeated dominant traits detected yet.</p>}</div><div><span>Context-safe diversification</span>{intelligence.antiHomogeneity.diversification.map((item) => <p key={item}>• {item}</p>)}</div></div></div>
+      <div className={`anti-homogeneity-card risk-${intelligence.antiHomogeneity.level.toLowerCase()}`}><div><div className="eyebrow"><RefreshCw size={12}/> Anti-homogeneity <ConceptInfo label="Anti-homogeneity">A check against repeatedly producing the same visual traits across projects. It encourages context-safe variation without forcing novelty.</ConceptInfo></div><h3>{intelligence.antiHomogeneity.level} similarity risk{intelligence.antiHomogeneity.similarity === null ? '' : ` · ${intelligence.antiHomogeneity.similarity}%`}</h3><p>{intelligence.antiHomogeneity.summary}</p></div><div className="anti-homogeneity-columns"><div><span>Repeated traits</span>{intelligence.antiHomogeneity.repeatedTraits.length ? intelligence.antiHomogeneity.repeatedTraits.map((trait) => <p key={trait}>• {trait}</p>) : <p>• No repeated dominant traits detected yet.</p>}</div><div><span>Context-safe diversification</span>{intelligence.antiHomogeneity.diversification.map((item) => <p key={item}>• {item}</p>)}</div></div></div>
     </section>
     <div className="explorer-tools">
       <label className="search-box"><Search size={16}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search navigation, motion, forms, FLIP…"/></label>
@@ -2257,8 +2507,9 @@ function CapabilitiesView({ capabilities: allCapabilities, selected, config, sea
   const selectedSet = new Set(selected)
   const missingDependencies = Array.from(new Set(allCapabilities.filter((item) => selectedSet.has(item.id)).flatMap((item) => item.dependencies ?? []).filter((id) => !selectedSet.has(id))))
   return <>
-    <PageHeader eyebrow="Product capability library" title="Specify what the app can do without hard-coding one type of product." copy="Keep this separate from visual design. Select generic capabilities, discover advanced engineering patterns, and add your own reusable concepts as your software vocabulary grows." action={<button className="primary-button" onClick={addCustom}><Plus size={16}/> Add capability</button>}/>
-    <div className="capability-principle"><Settings2 size={18}/><div><strong>Capability ≠ screen.</strong><p>Choose a capability because the product needs the behavior. Blueprint will carry the engineering intent into the generated implementation prompt.</p></div></div>
+    <PageHeader eyebrow="Product capability library" title="Specify what the app can do without hard-coding one type of product." copy="Keep this separate from visual design. Select generic capabilities, discover advanced engineering patterns, and add your own reusable concepts as your software vocabulary grows." tldr="Add a capability only when the product needs that behavior. Capabilities are reusable engineering intent—not screens." action={<button className="primary-button" onClick={addCustom}><Plus size={16}/> Add capability</button>}/>
+    <div className="capability-principle"><Settings2 size={18}/><div><strong className="concept-label">Capability ≠ screen. <ConceptInfo label="Product capability">A reusable behavior or engineering ability—such as audit logging, offline sync, or webhooks. It describes what the system can do, not a specific page.</ConceptInfo></strong><p>Choose a capability because the product needs the behavior. Blueprint will carry the engineering intent into the generated implementation prompt.</p></div></div>
+    <TldrSummary>Select a capability only when the product needs that behavior. Selected-but-incompatible capabilities remain saved but are excluded from generated scope.</TldrSummary>
     <div className="explorer-tools capability-tools"><label className="search-box"><Search size={15}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search auth, webhooks, offline, audit…"/></label><label className="select-wrap"><select value={category} onChange={(event) => setCategory(event.target.value as 'All' | CapabilityCategory)}>{capabilityCategories.map((item) => <option key={item}>{item}</option>)}</select></label><label className="select-wrap"><select value={level} onChange={(event) => setLevel(event.target.value as 'All' | CapabilityLevel)}><option>All</option><option>Core</option><option>Advanced</option><option>Specialized</option></select></label></div>
     <div className="pattern-count"><span>{filtered.length} capabilities shown</span><span>{selected.length} selected</span></div>
     {missingDependencies.length > 0 && <div className="dependency-warning"><CircleHelp size={17}/><div><strong>Foundation check</strong><p>Some selected capabilities reference foundations that are not selected: {missingDependencies.map((id) => allCapabilities.find((item) => item.id === id)?.name || id).join(', ')}.</p></div></div>}
@@ -2287,9 +2538,10 @@ function DocsView({ project, selectedCapabilities, toggle, updateProject, copy }
   const applyRecommended = () => updateProject({ docs: Array.from(new Set([...project.docs, ...recommendedIds])) })
   const manifest = buildDocsManifest(project, selectedCapabilities)
   return <>
-    <PageHeader eyebrow="MVP project docs" title="Choose the Markdown memory that should ship beside the code." copy="Use documentation as durable project memory—not paperwork. Select only files that will help future-you, collaborators, and coding agents understand the current truth of the repository." action={<button className="primary-button" onClick={applyRecommended}><WandSparkles size={16}/> Add recommended</button>}/>
+    <PageHeader eyebrow="MVP project docs" title="Choose the Markdown memory that should ship beside the code." copy="Use documentation as durable project memory—not paperwork. Select only files that will help future-you, collaborators, and coding agents understand the current truth of the repository." tldr="Select only docs that preserve useful project truth. Skip filler documentation." action={<button className="primary-button" onClick={applyRecommended}><WandSparkles size={16}/> Add recommended</button>}/>
     <div className="docs-summary"><div><span>Selected</span><strong>{selectedDocs.length}</strong><small>Markdown files</small></div><div><span>Recommended now</span><strong>{recommended.length}</strong><small>Based on selected capabilities</small></div><div className="docs-summary-actions"><button className="secondary-button" onClick={() => copy(manifest, 'Docs manifest copied')}><Copy size={15}/> Copy manifest</button><button className="secondary-button" onClick={() => downloadText(`${slugify(project.name)}-docs-manifest.md`, manifest, 'text/markdown')}><Download size={15}/> Download manifest</button></div></div>
-    <div className="docs-rule"><FileText size={18}/><div><strong>No filler docs.</strong><p>A selected file is a contract to keep project-specific commands, constraints, decisions, and current status there. Cross-link rather than duplicating entire sections.</p></div></div>
+    <div className="docs-rule"><FileText size={18}/><div><strong className="concept-label">No filler docs. <ConceptInfo label="Markdown project memory">Repository docs that preserve durable project truth for humans and coding agents: setup, commands, constraints, architecture, decisions, and current status.</ConceptInfo></strong><p>A selected file is a contract to keep project-specific commands, constraints, decisions, and current status there. Cross-link rather than duplicating entire sections.</p></div></div>
+    <TldrSummary>Use Add recommended, then remove anything you know nobody will maintain. Selected docs should preserve commands, constraints, decisions, or current status.</TldrSummary>
     <div className="docs-grid">{projectDocs.map((doc) => {
       const active = project.docs.includes(doc.id)
       const isRecommended = recommendedIds.includes(doc.id)
@@ -2310,7 +2562,7 @@ function CustomCapabilityModal({ close, add }: { close: () => void; add: (form: 
 function CompareView({ ids, patterns: allPatterns, selected, toggle, removeCompare, browse, learningMode }: { ids: string[]; patterns: Pattern[]; selected: string[]; toggle: (id: string) => void; removeCompare: (id: string) => void; browse: () => void; learningMode: boolean }) {
   const compare = ids.map((id) => allPatterns.find((pattern) => pattern.id === id)).filter(Boolean) as Pattern[]
   return <>
-    <PageHeader eyebrow="Compare variants" title="Different structure, different tradeoff." copy="Use this when two patterns sound similar in text but feel very different visually—like full-width bottom navigation versus a centered floating dock." action={<button className="secondary-button" onClick={browse}><Plus size={15}/> Add from library</button>}/>
+    <PageHeader eyebrow="Compare variants" title="Different structure, different tradeoff." copy="Use this when two patterns sound similar in text but feel very different visually—like full-width bottom navigation versus a centered floating dock." tldr="Compare patterns side by side when their names sound similar but their UX tradeoffs differ." action={<button className="secondary-button" onClick={browse}><Plus size={15}/> Add from library</button>}/>
     {compare.length < 2 ? <div className="compare-empty"><Layers3 size={30}/><h2>Stage at least two patterns.</h2><p>Open Pattern Explorer, tap Compare on two or three options, then return here.</p><button className="primary-button" onClick={browse}>Browse patterns</button></div> : <div className={`compare-grid compare-${compare.length}`}>{compare.map((pattern) => <article className="compare-column" key={pattern.id}><div className="compare-preview"><PatternPreview type={pattern.preview} annotated={learningMode}/><button className="icon-button compare-remove" onClick={() => removeCompare(pattern.id)} aria-label="Remove from comparison"><X size={16}/></button></div><div className="compare-head"><span>{pattern.category} · {pattern.level}</span><h2>{pattern.name}</h2><p>{pattern.summary}</p></div><CompareFact label="Design principle" value={pattern.principle || 'Use the pattern only when its structure supports the user task.'}/><CompareFact label="Best for" value={pattern.bestFor}/><CompareFact label="Watch out" value={pattern.watchout}/><CompareFact label="Prompt language" value={pattern.prompt}/><div className="compare-tags">{pattern.tags.map((tag) => <span key={tag}>{tag}</span>)}</div><button className={selected.includes(pattern.id) ? 'secondary-button selected-action' : 'primary-button'} onClick={() => toggle(pattern.id)}>{selected.includes(pattern.id) ? <><Check size={15}/> Selected</> : <><BookmarkPlus size={15}/> Add to spec</>}</button></article>)}</div>}
   </>
 }
@@ -2358,7 +2610,7 @@ function ReferenceVisual({ reference }: { reference: ReferenceItem }) {
 
 function ReferencesView({ project, add, remove }: { project: Project; add: () => void; remove: (id: string) => void }) {
   return <>
-    <PageHeader eyebrow="Reference board" title="Save the exact thing you like—not an entire design to imitate." copy="Add screenshots, links, and a note about what should influence the project. This keeps references directional: typography from one site, navigation from another, motion from somewhere else." action={<button className="primary-button" onClick={add}><Plus size={16}/> Add reference</button>}/>
+    <PageHeader eyebrow="Reference board" title="Save the exact thing you like—not an entire design to imitate." copy="Add screenshots, links, and a note about what should influence the project. This keeps references directional: typography from one site, navigation from another, motion from somewhere else." tldr="Save the specific idea you want to borrow and say what not to copy." action={<button className="primary-button" onClick={add}><Plus size={16}/> Add reference</button>}/>
     <div className="reference-rule"><Lightbulb size={18}/><div><strong>Good reference note</strong><p>“I like the centered dock and active-state treatment. Do not copy the color palette or page composition.”</p></div></div>
     {project.references.length ? <div className="reference-grid">{project.references.map((reference) => <article className="reference-card" key={reference.id}><ReferenceVisual reference={reference}/><div className="reference-body"><div className="reference-head"><div><span>{reference.focus.join(' · ') || 'General direction'}</span><h3>{reference.title}</h3></div><button className="icon-button" onClick={() => remove(reference.id)} aria-label="Remove reference"><Trash2 size={15}/></button></div><p>{reference.note || 'No note yet. Add a precise note next time you refine this reference.'}</p><div className="reference-foot">{reference.url ? <a href={reference.url} target="_blank" rel="noreferrer"><LinkIcon size={13}/> Open source <ExternalLink size={12}/></a> : <span><ImageIcon size={13}/> Screenshot reference</span>}<small>{new Date(reference.createdAt).toLocaleDateString()}</small></div></div></article>)}</div> : <div className="reference-empty"><ImageIcon size={32}/><h2>Your board is intentionally empty.</h2><p>Start with one screenshot or URL and label exactly what you want to borrow as a principle.</p><button className="primary-button" onClick={add}>Add first reference</button></div>}
   </>
@@ -2369,7 +2621,7 @@ function InspirationView({ addReference }: { addReference: () => void }) {
   const groups = ['All', 'Product UI', 'Visual', 'Motion', 'Type', 'Color']
   const filtered = inspiration.filter((site) => filter === 'All' || site.group === filter)
   return <>
-    <PageHeader eyebrow="Inspiration launchpad" title="Browse with a question, not with a blank mind." copy="Use curated sources to expand your visual vocabulary. When something works, capture the exact idea on the Reference Board or turn it into a custom pattern." action={<button className="secondary-button" onClick={addReference}><BookmarkPlus size={15}/> Capture reference</button>}/>
+    <PageHeader eyebrow="Inspiration launchpad" title="Browse with a question, not with a blank mind." copy="Use curated sources to expand your visual vocabulary. When something works, capture the exact idea on the Reference Board or turn it into a custom pattern." tldr="Browse for one design answer, then capture the useful idea instead of copying the whole site." action={<button className="secondary-button" onClick={addReference}><BookmarkPlus size={15}/> Capture reference</button>}/>
     <div className="chip-row">{groups.map((group) => <button className={filter === group ? 'active' : ''} onClick={() => setFilter(group)} key={group}>{group}</button>)}</div>
     <div className="link-grid">{filtered.map((site, index) => <a href={site.url} target="_blank" rel="noreferrer" className="link-card" key={site.name}><div className="link-index">{String(index + 1).padStart(2, '0')}</div><div><span>{site.group}</span><h3>{site.name}</h3><p>{site.use}</p><small>{site.searchHint}</small></div><ExternalLink size={17}/></a>)}</div>
     <section className="inspiration-workflow"><div><div className="eyebrow">A better browsing loop</div><h2>Turn inspiration into reusable knowledge.</h2></div><ol><li><span>01</span><div><strong>Browse with a design question</strong><p>“What are alternatives to my usual sidebar?” beats “show me nice websites.”</p></div></li><li><span>02</span><div><strong>Isolate the useful idea</strong><p>Navigation, hierarchy, typography, motion, spacing, color, or composition.</p></div></li><li><span>03</span><div><strong>Capture it</strong><p>Save a reference or add a custom discovery so the idea remains available months later.</p></div></li></ol></section>
@@ -2391,21 +2643,23 @@ function SpecView({ project, selectedPatterns, selectedCapabilities, similarity,
   const visualSignals = visualReviewSignals(project.dna, resolvedPatterns, project.context)
   const director = projectVisualDirector(project, config)
   const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const guidedDecisions = guidedSetupDecisions(project.context, config)
+  const guidedStatus = guidedBuildStatus(project.context, config, approval.status)
+  const guidedAttention = guidedUnresolvedDecisions(guidedDecisions)
   const approvedContractText = project.approvedVisualContract ? approvedVisualContractPrompt(project.approvedVisualContract) : ''
-  const setupIncompleteSignal = contextSignals.find((signal) => signal.id === 'context-recommended-setup-incomplete')
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
   const contextEntries = projectContextEntries(project.context)
   const reviewCount = reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length
   const { snapshots: _localCheckpoints, references: _localReferences, ...projectContract } = project
   const referenceContract = project.references.map(({ imageData: _imageData, imageAssetId: _imageAssetId, ...reference }) => reference)
   const jsonSpec = JSON.stringify({
-    version: 19,
-    blueprintVersion: '0.31.0',
+    version: 20,
+    blueprintVersion: '0.33.0',
     visualApproval: { status: approval.status, label: approval.label, changedAreas: approval.changedAreas, contract: project.approvedVisualContract ?? null },
     visualDirector: director,
     patternExplorer: patternIntel,
     pageComposition: pageIntel,
-    intelligence: { readiness, reviewSignals, scopeContract: compileScopeContract(config), scopeStateSummary: scopeStateSummary(config), scopeIntegrityDiagnostics: scopeIntegrityDiagnostics(config), implementationRoadmap: roadmap, recommendationProvenance: configSettings.filter((setting) => settingIncludedInContract(setting, config)).map((setting) => ({ id: setting.id, label: setting.label, ...settingRecommendationProvenance(setting, config) })), projectContextReviewSignals: contextSignals, contextGapDecisions: contextDecisions, visualReviewSignals: visualSignals, crossLayerSignals: layerSignals, acceptanceCriteria: criteria, edgeCases: cases, appTypeMatches: appTypeMatches(config) },
+    intelligence: { readiness, guidedExperience: { status: guidedStatus, decisions: guidedDecisions }, reviewSignals, scopeContract: compileScopeContract(config), scopeStateSummary: scopeStateSummary(config), scopeIntegrityDiagnostics: scopeIntegrityDiagnostics(config), implementationRoadmap: roadmap, recommendationProvenance: configSettings.filter((setting) => settingIncludedInContract(setting, config)).map((setting) => ({ id: setting.id, label: setting.label, ...settingRecommendationProvenance(setting, config) })), projectContextReviewSignals: contextSignals, contextGapDecisions: contextDecisions, visualReviewSignals: visualSignals, crossLayerSignals: layerSignals, acceptanceCriteria: criteria, edgeCases: cases, appTypeMatches: appTypeMatches(config) },
     project: { ...projectContract, config, selected: resolvedPatterns.map((pattern) => pattern.id), capabilities: resolvedCapabilities.map((capability) => capability.id), references: referenceContract },
     selectedPatterns: resolvedPatterns,
     selectedCapabilities: resolvedCapabilities,
@@ -2413,11 +2667,20 @@ function SpecView({ project, selectedPatterns, selectedCapabilities, similarity,
     selectedDocs: selectedDocs.map((doc) => ({ id: doc.id, filename: doc.filename, title: doc.title })),
   }, null, 2)
   return <>
-    <PageHeader eyebrow="Generated blueprint" title="Compiled implementation brief, with the full Blueprint kept separate." copy="A fresh approved Visual Contract becomes the primary visual authority for implementation. Stale approval is surfaced and never silently reused; the exhaustive Blueprint remains available as an audit reference." action={<button className="primary-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}><Copy size={16}/> Copy AI prompt</button>}/>
+    <PageHeader eyebrow="Review & build" title={guidedStatus.state === 'ready' ? 'Blueprint is ready to hand off.' : 'Blueprint will tell you exactly what is still unresolved.'} copy="No hunting through review panels. Goal-critical setup gaps and visual approval status are surfaced here before the implementation prompt is treated as final." tldr="If this page says Ready to build, the handoff is usable. If not, follow the one surfaced next action before copying the prompt." action={<button className="primary-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}><Copy size={16}/> Copy AI prompt</button>}/>
+    <section className={`build-readiness-banner ${guidedStatus.state}`}><div>{guidedStatus.state === 'ready' ? <CircleCheckBig size={20}/> : <AlertTriangle size={20}/>}<div><span>{guidedStatus.state === 'ready' ? 'Ready to build' : 'Before implementation'}</span><strong>{guidedStatus.label}</strong><p>{guidedStatus.detail}</p></div></div>{guidedStatus.state !== 'ready' ? <button className="primary-button compact-button" onClick={() => setView(guidedStatus.next === 'setup' ? 'setup' : 'preview')}>{guidedStatus.next === 'setup' ? 'Fix setup' : 'Review preview'} <ArrowRight size={13}/></button> : <button className="secondary-button compact-button" onClick={() => setView('preview')}>Review approved design</button>}</section>
     <div className="spec-toolbar"><button onClick={() => downloadText(`${slugify(project.name)}-implementation.md`, markdown, 'text/markdown')}><FileText size={15}/> Implementation</button><button onClick={() => downloadText(`${slugify(project.name)}-blueprint-reference.md`, blueprintReference, 'text/markdown')}><FileText size={15}/> Blueprint reference</button><button onClick={() => downloadText(`${slugify(project.name)}-docs-manifest.md`, docsManifest, 'text/markdown')}><FileText size={15}/> Docs manifest</button><button onClick={() => downloadText(`${slugify(project.name)}-blueprint.json`, jsonSpec, 'application/json')}><FileJson size={15}/> JSON</button>{project.approvedVisualContract && <button onClick={() => downloadText(`${slugify(project.name)}-approved-visual-contract.md`, approvedContractText, 'text/markdown')}><Check size={15}/> Visual contract</button>}<button onClick={addSnapshot}><Save size={15}/> Save checkpoint</button></div>
-    <div className="spec-layout"><section className="spec-sheet"><label className="spec-project"><span>Project name</span><input value={project.name} onChange={(event) => updateProject({ name: event.target.value })}/></label>
+    <TldrOnly><section className="spec-tldr-overview">
+      <article className={guidedStatus.state}><span>Build status</span><strong>{guidedStatus.label}</strong><p>{guidedStatus.detail}</p>{guidedStatus.state !== 'ready' && <button className="text-button" onClick={() => setView(guidedStatus.next === 'setup' ? 'setup' : 'preview')}>Resolve next issue <ArrowRight size={13}/></button>}</article>
+      <article><span>Product scope</span><strong>{config.appType}</strong><p>{configSettings.filter((setting) => settingIncludedInContract(setting, config)).length} active decisions · {config.overrides.length + Object.keys(config.scopeChoices).length} deliberate choices.</p><button className="text-button" onClick={() => setView('setup')}>Review setup <ArrowRight size={13}/></button></article>
+      <article className={approval.status}><span>Visual authority <ConceptInfo label="Visual Contract">A snapshot of the visual direction you explicitly approved. It governs presentation only and never authorizes functional scope.</ConceptInfo></span><strong>{approval.label}</strong><p>{approval.status === 'approved' ? 'Current visual direction is explicitly approved.' : approval.detail}</p><button className="text-button" onClick={() => setView('preview')}>Open preview <ArrowRight size={13}/></button></article>
+      <article><span>Delivery plan</span><strong>{roadmap.phases.length} phases</strong><p>{roadmap.phases.filter((phase) => phase.blocking).length} blocking gate{roadmap.phases.filter((phase) => phase.blocking).length === 1 ? '' : 's'} · {project.coreFlows.length} authored core flow{project.coreFlows.length === 1 ? '' : 's'}.</p><button className="text-button" onClick={() => setView('roadmap')}>Open roadmap <ArrowRight size={13}/></button></article>
+      <article><span>Review signals</span><strong>{reviewCount || 'None'}</strong><p>{reviewCount ? 'Review signals remain visible in the full view; blockers still control build readiness.' : 'No review signal is currently competing with the handoff.'}</p></article>
+      <article><span>Handoff</span><strong>{guidedStatus.state === 'ready' ? 'Prompt is usable' : 'Resolve first'}</strong><p>The AI prompt remains the primary compiled execution contract. Blueprint reference is for audit and lookup.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy AI prompt <Copy size={13}/></button></article>
+    </section></TldrOnly>
+    <VerboseOnly><div className="spec-layout"><section className="spec-sheet"><label className="spec-project"><span>Project name</span><input value={project.name} onChange={(event) => updateProject({ name: event.target.value })}/></label>
       <div className="spec-section"><span className="spec-number">01</span><div><div className="eyebrow">App setup</div><h2>{config.appType}</h2><div className="spec-facts"><span>{config.profile} profile</span><span>{resolvedOperationalScale(config)} scale</span><span>{config.overrides.length + Object.keys(config.scopeChoices).length} deliberate choices</span><span>{configSettings.filter((setting) => settingIncludedInContract(setting, config)).length} active decisions</span></div>{(config.overrides.length || Object.keys(config.scopeChoices).length) ? <div className="spec-config-overrides">{Object.entries(config.scopeChoices).slice(0, 6).map(([id, choice]) => { const setting = configSettings.find((item) => item.id === id); return setting ? <div key={`scope-${id}`}><span>{setting.label}</span><strong>{choice}</strong></div> : null })}{config.overrides.slice(0, 12).map((id) => { const setting = configSettings.find((item) => item.id === id); return setting && settingIncludedInContract(setting, config) ? <div key={id}><span>{setting.label}</span><strong>{formatConfigValue(effectiveConfigValue(config, id))}</strong></div> : null })}</div> : <p className="spec-muted">No explicit scope choices yet. Recommendations remain suggestions only; quality defaults apply only inside active scope.</p>}<button className="text-button" onClick={() => setView('setup')}>Review app setup <ArrowUpRight size={14}/></button></div></div>
-      <div className="spec-section"><span className="spec-number">02</span><div><div className="eyebrow">Readiness & proof</div><div className="spec-readiness"><div><strong>{setupIncompleteSignal ? 'Recommended setup incomplete' : readiness.label}</strong><span>{readiness.score}% coherence indicator</span><small>{setupIncompleteSignal ? 'Project intent is not fully represented by active scope' : readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''}` : readiness.important ? `${readiness.important} important` : reviewCount ? `${reviewCount} review signal${reviewCount > 1 ? 's' : ''}` : 'No review signals'}</small></div><div className="spec-proof-list"><strong>Acceptance criteria</strong>{criteria.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div><div className="spec-proof-list"><strong>Edge cases</strong>{cases.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div></div>{(reviewSignals.length > 0 || contextSignals.length > 0 || visualSignals.length > 0) && <div className="spec-review-signals">{reviewSignals.slice(0, 4).map((signal) => <p key={`${signal.id}-${signal.detail}`}><strong>{signal.severity.toUpperCase()} · {signal.category}</strong> — {signal.title}: {signal.detail}</p>)}{contextSignals.slice(0, 3).map((signal) => <p key={signal.id}><strong>{signal.severity === 'important' ? 'IMPORTANT · scope' : 'Advisory'}:</strong> {signal.detail}</p>)}{visualSignals.slice(0, 4).map((signal) => <p key={signal}><strong>Visual:</strong> {signal}</p>)}</div>}</div></div>
+      <div className="spec-section"><span className="spec-number">02</span><div><div className="eyebrow">Readiness & proof</div><div className="spec-readiness"><div><strong>{guidedStatus.label}</strong><span>{guidedStatus.state === 'ready' ? 'Goal-critical setup and visual approval covered' : `${guidedAttention.length} guided decision${guidedAttention.length === 1 ? '' : 's'} unresolved`}</span><small>{guidedStatus.detail}</small></div><div className="spec-proof-list"><strong>Acceptance criteria</strong>{criteria.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div><div className="spec-proof-list"><strong>Edge cases</strong>{cases.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div></div>{(reviewSignals.length > 0 || contextSignals.length > 0 || visualSignals.length > 0) && <div className="spec-review-signals">{reviewSignals.slice(0, 4).map((signal) => <p key={`${signal.id}-${signal.detail}`}><strong>{signal.severity.toUpperCase()} · {signal.category}</strong> — {signal.title}: {signal.detail}</p>)}{contextSignals.slice(0, 3).map((signal) => <p key={signal.id}><strong>{signal.severity === 'important' ? 'IMPORTANT · scope' : 'Advisory'}:</strong> {signal.detail}</p>)}{visualSignals.slice(0, 4).map((signal) => <p key={signal}><strong>Visual:</strong> {signal}</p>)}</div>}</div></div>
       <div className="spec-section"><span className="spec-number">03</span><div><div className="eyebrow">Project context · optional</div>{contextEntries.length ? <div className="spec-context-list">{contextEntries.map((entry) => <div key={entry.id}><span>{entry.label}</span><p>{entry.value}</p></div>)}</div> : <p className="spec-muted">No optional human briefing supplied. Structured Blueprint scope remains sufficient.</p>}<small className="spec-muted">Verbatim guidance only — this never changes App Setup automatically.</small>{contextDecisions.length > 0 && <div className="spec-review-signals">{contextDecisions.map((decision) => <p key={decision.id}><strong>{decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · {decision.confidence}</strong> — {decision.decision} <em>Source: {decision.source}</em></p>)}</div>}</div></div>
       <div className="spec-section"><span className="spec-number">04</span><div><div className="eyebrow">Core flows · user-authored</div>{project.coreFlows.length ? <div className="spec-core-flows">{project.coreFlows.map((flow) => { const quality = coreFlowQuality(flow); return <article key={flow.id}><div><h3>{flow.title || 'Untitled flow'}</h3><span>{flow.actor || 'Actor not specified'} · {quality.complete ? 'Ready' : `${quality.score}% complete`}</span></div><p>{flow.goal || 'Goal not specified'} → <strong>{flow.successState || 'Success state not specified'}</strong></p><div className="spec-flow-path">{flow.steps.filter((step) => step.trim()).slice(0, 6).map((step, index) => <span key={`${flow.id}-${index}`}>{index + 1}. {step}</span>)}</div></article> })}</div> : <div className="spec-empty"><p>No user-authored workflow contract supplied. App Setup remains authoritative and implementation agents should not invent major workflow scope.</p><button className="text-button" onClick={() => setView('flows')}>Define core flows <ArrowUpRight size={14}/></button></div>}<button className="text-button" onClick={() => setView('flows')}>Review core flows <ArrowUpRight size={14}/></button></div></div>
       <div className="spec-section"><span className="spec-number">05</span><div><div className="eyebrow">Derived implementation roadmap</div><div className="spec-roadmap-list">{roadmap.phases.map((phase, index) => <article key={phase.id} className={phase.blocking ? 'blocking' : ''}><span>{String(index + 1).padStart(2, '0')}</span><div><div><h3>{phase.title}</h3><small>{phase.kind}{phase.blocking ? ' · blocking gate' : ''}</small></div><p>{phase.objective}</p><em>{phase.deliverables.length} deliverable{phase.deliverables.length === 1 ? '' : 's'} · {phase.proof.length} proof gate{phase.proof.length === 1 ? '' : 's'}</em></div></article>)}</div><p className="spec-muted">Derived automatically from resolved App Setup + Core Flows. It sequences work but never creates scope.</p><button className="text-button" onClick={() => setView('roadmap')}>Open implementation roadmap <ArrowUpRight size={14}/></button></div></div>
@@ -2433,7 +2696,7 @@ function SpecView({ project, selectedPatterns, selectedCapabilities, similarity,
       <div className="spec-section"><span className="spec-number">15</span><div><div className="eyebrow">References</div>{project.references.length ? <div className="spec-reference-list">{project.references.map((reference) => <div key={reference.id}><strong>{reference.title}</strong><span>{reference.focus.join(', ') || 'General direction'}</span><p>{reference.note}</p></div>)}</div> : <p className="spec-muted">No directional references saved.</p>}</div></div>
       <div className="spec-section"><span className="spec-number">16</span><div><div className="eyebrow">Anti-homogeneity review</div><p className="guardrail">{patternIntel.antiHomogeneity.summary} {patternIntel.antiHomogeneity.repeatedTraits.length ? `Repeated traits: ${patternIntel.antiHomogeneity.repeatedTraits.join('; ')}.` : 'No dominant repeated traits detected yet.'}</p></div></div>
       <div className="spec-section last"><span className="spec-number">17</span><div><div className="eyebrow">Guardrail</div><p className="guardrail">App Setup is the source of truth for product scope. Explicit scope and true required dependencies outrank everything else. A fresh Approved Visual Contract is authoritative only for visual/presentational implementation; stale approval is audit history until re-approved. Suggested scope is never implementation scope. Core Flows are explicit workflow intent only inside resolved scope and never activate excluded capabilities. The Derived Implementation Roadmap sequences that resolved work but never creates or overrides scope. Optional Project Context is verbatim human guidance only and never changes scope automatically. Capabilities and visual patterns are applied only when compatible with resolved App Setup; excluded saved selections are not requirements. Recommended behavior/quality defaults apply only inside active scope. Preserve usability, responsiveness, accessibility, data integrity, and the actual workflow; references remain directional only.</p></div></div>
-    </section><aside className="spec-aside"><div className="aside-card"><Sparkles size={18}/><strong>AI implementation prompt</strong><p>Compiled execution contract: scope authority, material decisions, roadmap, proof, and review signals.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy prompt <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Implementation contract</strong><p>Human-first compiled brief without the exhaustive resolved-setting dump.</p><button className="text-button" onClick={() => copy(markdown, 'Implementation contract copied')}>Copy contract <Copy size={13}/></button></div>{project.approvedVisualContract && <div className="aside-card"><Check size={18}/><strong>Approved Visual Contract</strong><p>{approval.status === 'approved' ? 'Fresh visual authority used by the compiler.' : 'Saved approval snapshot is stale and preserved only for audit until re-approved.'}</p><button className="text-button" onClick={() => copy(approvedContractText, 'Approved Visual Contract copied')}>Copy visual contract <Copy size={13}/></button></div>}<div className="aside-card"><FileText size={18}/><strong>Blueprint reference</strong><p>Exhaustive resolved settings for audit, debugging, and targeted lookup—not the primary coding prompt.</p><button className="text-button" onClick={() => copy(blueprintReference, 'Blueprint reference copied')}>Copy reference <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Docs manifest</strong><p>Exact selected Markdown files with purpose and suggested sections.</p><button className="text-button" onClick={() => copy(docsManifest, 'Docs manifest copied')}>Copy manifest <Copy size={13}/></button></div><div className="aside-card"><Settings2 size={18}/><strong>Structured JSON</strong><p>Portable contract plus roadmap, readiness, acceptance criteria, edge cases, and app-type fit.</p><button className="text-button" onClick={() => copy(jsonSpec, 'JSON copied')}>Copy JSON <Copy size={13}/></button></div></aside></div>
+    </section><aside className="spec-aside"><div className="aside-card"><Sparkles size={18}/><strong>AI implementation prompt</strong><p>Compiled execution contract: scope authority, material decisions, roadmap, proof, and review signals.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy prompt <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Implementation contract</strong><p>Human-first compiled brief without the exhaustive resolved-setting dump.</p><button className="text-button" onClick={() => copy(markdown, 'Implementation contract copied')}>Copy contract <Copy size={13}/></button></div>{project.approvedVisualContract && <div className="aside-card"><Check size={18}/><strong>Approved Visual Contract</strong><p>{approval.status === 'approved' ? 'Fresh visual authority used by the compiler.' : 'Saved approval snapshot is stale and preserved only for audit until re-approved.'}</p><button className="text-button" onClick={() => copy(approvedContractText, 'Approved Visual Contract copied')}>Copy visual contract <Copy size={13}/></button></div>}<div className="aside-card"><FileText size={18}/><strong>Blueprint reference</strong><p>Exhaustive resolved settings for audit, debugging, and targeted lookup—not the primary coding prompt.</p><button className="text-button" onClick={() => copy(blueprintReference, 'Blueprint reference copied')}>Copy reference <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Docs manifest</strong><p>Exact selected Markdown files with purpose and suggested sections.</p><button className="text-button" onClick={() => copy(docsManifest, 'Docs manifest copied')}>Copy manifest <Copy size={13}/></button></div><div className="aside-card"><Settings2 size={18}/><strong>Structured JSON</strong><p>Portable contract plus roadmap, readiness, acceptance criteria, edge cases, and app-type fit.</p><button className="text-button" onClick={() => copy(jsonSpec, 'JSON copied')}>Copy JSON <Copy size={13}/></button></div></aside></div></VerboseOnly>
   </>
 }
 

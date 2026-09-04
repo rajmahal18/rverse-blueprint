@@ -1,6 +1,6 @@
 # RVerse Blueprint v0.31 — Visual Intelligence Program Completion Handoff
 
-### Stable baseline
+## Stable baseline
 
 v0.31 completes the planned **v0.26 → v0.31 Visual Intelligence program**.
 

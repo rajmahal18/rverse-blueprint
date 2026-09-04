@@ -10,6 +10,7 @@ import {
   type ColorScheme, type DirectionCategoryId, type SuggestionContext, type VisualDirection,
 } from '../data/visualSuggestions'
 import type { VisualDirectorOutput } from '../data/visualDirector'
+import { ConceptInfo, TldrOnly, TldrSummary, VerboseOnly, useGuidanceMode } from './Guidance'
 
 type Recommendation = { pattern: Pattern; reason: string }
 type Props = {
@@ -71,20 +72,47 @@ const selectOptions = {
   designAutonomy: ['Strict','Balanced','Art Director'], visualOriginality: ['Safe','Distinct','Bold','Experimental'], signatureStrength: ['None','Subtle','Recommended','Strong'],
 } as const
 
+const visualConceptHelp: Record<string, string> = {
+  'Design autonomy': 'How much implementation freedom the coding AI gets when Blueprint has not specified a visual detail. It never grants permission to invent product scope.',
+  'Visual originality': 'How far the visual direction may move away from familiar, conventional app patterns while still respecting usability and explicit constraints.',
+  'Signature brand moment': 'The intended strength of one memorable visual behavior or composition that helps the product feel specifically designed rather than generic.',
+  'Dark palette strategy': 'Whether dark mode is mechanically adapted from the light palette or curated as its own deliberate set of color roles.',
+  'Weight contrast': 'How much typographic hierarchy should rely on differences between light and heavy font weights.',
+  'Monospace usage': 'Where a fixed-width typeface is allowed. Useful for metadata or technical content, but easy to overuse as a generic tech aesthetic.',
+  'Readable line width': 'The target text measure in characters. Shorter measures make long reading easier; wider measures fit denser interfaces.',
+  'Whitespace priority': 'The overall breathing-room posture. It influences density, gutters, and section spacing together.',
+  'Information density': 'How much content and control surface should fit into a given area. Higher values favor scanning efficiency over spaciousness.',
+  'Grid character': 'The composition logic behind alignment: strict columns, flexible grids, asymmetric layouts, editorial flow, or content-led placement.',
+  'Catalog / working-surface density': 'Density specifically for repetitive operational surfaces such as tables, catalogs, queues, dashboards, and admin workspaces.',
+  'Navigation variant': 'The structural placement of primary navigation. Auto / Recommended lets Blueprint choose from product context without changing functional scope.',
+  'Responsive behavior': 'How deliberately the layout changes across screen sizes instead of merely shrinking the desktop composition.',
+  'Section strategy': 'How major page regions are visually separated so the interface does not become one undifferentiated canvas.',
+  'Surface language': 'How panels and containers communicate grouping: borderless, tonal, bordered, elevated, or mixed.',
+  'Accent usage': 'How often the accent color is allowed to compete for attention. Focused or rare use generally preserves clearer hierarchy.',
+  'Ease-of-use priority': 'How strongly usability should constrain visual experimentation when the two come into tension.',
+  'Creative stretch': 'How willing the visual system should be to push beyond safe conventions while staying inside explicit product and accessibility constraints.',
+}
+
+function VisualFieldLabel({ label }: { label: string }) {
+  const help = visualConceptHelp[label]
+  return <span className="visual-field-label"><span>{label}</span>{help && <ConceptInfo label={label}>{help}</ConceptInfo>}</span>
+}
+
 function SelectField<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: readonly T[]; onChange: (value: T) => void }) {
-  return <label className="visual-field"><span>{label}</span><select value={value} onChange={(e) => onChange(e.target.value as T)}>{options.map((option) => <option key={option}>{option}</option>)}</select></label>
+  return <div className="visual-field"><VisualFieldLabel label={label}/><select aria-label={label} value={value} onChange={(e) => onChange(e.target.value as T)}>{options.map((option) => <option key={option}>{option}</option>)}</select></div>
 }
 function RangeField({ label, value, min, max, step=1, suffix='', onChange }: { label:string; value:number; min:number; max:number; step?:number; suffix?:string; onChange:(value:number)=>void }) {
-  return <label className="visual-range"><div><span>{label}</span><b>{value}{suffix}</b></div><input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))}/></label>
+  return <div className="visual-range"><div><VisualFieldLabel label={label}/><b>{value}{suffix}</b></div><input aria-label={label} type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))}/></div>
 }
 function ToggleField({ label, checked, onChange, helper }: { label:string; checked:boolean; onChange:(value:boolean)=>void; helper?:string }) {
-  return <label className="visual-toggle"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}/><span><strong>{label}</strong>{helper && <small>{helper}</small>}</span></label>
+  return <label className="visual-toggle"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}/><span><strong><VisualFieldLabel label={label}/></strong>{helper && <small>{helper}</small>}</span></label>
 }
 function Group({ number, title, badge, children }: { number:string; title:string; badge?:string; children:React.ReactNode }) {
   return <section className="visual-group"><header className="visual-group-head"><div><div className="eyebrow">{number}</div><h3>{title}</h3></div>{badge && <span>{badge}</span>}</header>{children}</section>
 }
 
 export default function VisualStudio({ dna: rawDna, onChange, suggestionContext, recommendations, onOpenPattern, onAddPattern, sanity, director }: Props) {
+  const { tldrMode } = useGuidanceMode()
   const dna = normalizeDna(rawDna)
   const [depth, setDepth] = useState<VisualDepth>(() => {
     try {
@@ -133,14 +161,15 @@ export default function VisualStudio({ dna: rawDna, onChange, suggestionContext,
   const toggleAnti = (item:string) => patch({ visualAntiPatterns:dna.visualAntiPatterns.includes(item)?dna.visualAntiPatterns.filter((x)=>x!==item):[...dna.visualAntiPatterns,item] })
 
   return <>
-    <header className="page-header"><div><div className="eyebrow">Visual Studio · v0.28</div><h1>See a coherent art direction before tuning raw controls.</h1><p>Visual Director synthesizes the product context into one project-specific direction. You can apply it as a starting point, then refine any advanced control without giving it permission to invent functional scope.</p></div></header>
+    <header className={`page-header ${tldrMode ? 'page-header-tldr' : ''}`}><div><div className="eyebrow">Visual Studio · visual authority</div><h1>See a coherent art direction before tuning raw controls.</h1><p>{tldrMode ? 'Pick or refine the visual direction. Scope remains untouched.' : 'Visual Director synthesizes the product context into one project-specific direction. You can apply it as a starting point, then refine any advanced control without giving it permission to invent functional scope.'}</p>{tldrMode && <span className="page-tldr-chip">TL;DR · direction + high-impact controls</span>}</div></header>
     <div className="visual-depth-bar"><div><div className="eyebrow"><Layers3 size={12}/> Configuration depth</div><p>{depth==='Quick'?'High-impact choices only.':depth==='Standard'?'Normal design-system control.':'Every applicable visual token.'} Changing depth never changes the project itself.</p></div><div className="visual-depth-tabs">{(['Quick','Standard','Advanced'] as VisualDepth[]).map((item)=><button key={item} className={depth===item?'active':''} onClick={()=>setDepth(item)}>{item}</button>)}</div></div>
 
-    <section className="visual-director-card"><div className="visual-director-head"><div><div className="eyebrow"><Sparkles size={12}/> Visual Director · synthesized</div><h2>{director.directionName}</h2><p>{director.thesis}</p></div><button className="primary-button" onClick={()=>commit(director.proposedDna)}><Sparkles size={15}/> Use Visual Director</button></div><div className="visual-director-meta"><span>{director.designDNA.archetype}</span><span>{director.designDNA.visualTension}</span><span>{director.visualOriginality} originality</span><span>{director.designAutonomy} autonomy</span></div><div className="visual-director-grid"><div><strong>Composition</strong><p>{director.designDNA.composition}</p></div><div><strong>Typography</strong><p>{director.typographyDirection}</p></div><div><strong>Signature element</strong><p>{director.signatureElement}</p></div><div><strong>Hard constraints</strong><p>{director.hardConstraints.slice(0,3).join(' ')}</p></div></div><small>Hard constraints outrank the recommended direction; implementation freedom applies only where Blueprint is silent.</small></section>
+    <section className="visual-director-card"><div className="visual-director-head"><div><div className="eyebrow"><Sparkles size={12}/> Visual Director · synthesized <ConceptInfo label="Visual Director">A context-aware visual recommendation. It proposes art direction only; it cannot create features, permissions, or product scope.</ConceptInfo></div><h2>{director.directionName}</h2><p>{director.thesis}</p></div><button className="primary-button" onClick={()=>commit(director.proposedDna)}><Sparkles size={15}/> Use Visual Director</button></div><div className="visual-director-meta"><span>{director.designDNA.archetype}</span><span>{director.designDNA.visualTension}</span><span>{director.visualOriginality} originality</span><span>{director.designAutonomy} autonomy</span></div><TldrSummary title="Direction in one line">{director.designDNA.composition} · {director.typographyDirection} · signature: {director.signatureElement}</TldrSummary><VerboseOnly><div className="visual-director-grid"><div><strong>Composition</strong><p>{director.designDNA.composition}</p></div><div><strong>Typography</strong><p>{director.typographyDirection}</p></div><div><strong>Signature element</strong><p>{director.signatureElement}</p></div><div><strong>Hard constraints</strong><p>{director.hardConstraints.slice(0,3).join(' ')}</p></div></div><small>Hard constraints outrank the recommended direction; implementation freedom applies only where Blueprint is silent.</small></VerboseOnly></section>
 
     <div className="visual-director-controls"><SelectField label="Design autonomy" value={dna.designAutonomy} options={selectOptions.designAutonomy} onChange={(designAutonomy:DesignAutonomy)=>patch({designAutonomy})}/><SelectField label="Visual originality" value={dna.visualOriginality} options={selectOptions.visualOriginality} onChange={(visualOriginality:VisualOriginality)=>patch({visualOriginality})}/><SelectField label="Signature brand moment" value={dna.signatureStrength} options={selectOptions.signatureStrength} onChange={(signatureStrength:SignatureStrength)=>patch({signatureStrength})}/><div className="visual-director-control-note"><strong>Premium is a quality bar, not a preset.</strong><span>Composition, typography, spacing, imagery, hierarchy, and responsive behavior should feel deliberate without defaulting to black/beige, giant serifs, glass, or generic card grids.</span></div></div>
 
-    <VisualSuggestions dna={dna} context={{ ...suggestionContext, dna }} previewDna={previewDna} previewLabel={previewLabel} onPreview={(next,label)=>{ setPreviewDna(next); setPreviewLabel(label) }} onClearPreview={clearPreview} onCommit={commit}/>
+    <TldrOnly><details className="tldr-on-demand"><summary>Explore alternative visual directions & color schemes</summary><VisualSuggestions dna={dna} context={{ ...suggestionContext, dna }} previewDna={previewDna} previewLabel={previewLabel} onPreview={(next,label)=>{ setPreviewDna(next); setPreviewLabel(label) }} onClearPreview={clearPreview} onCommit={commit}/></details></TldrOnly>
+    <VerboseOnly><VisualSuggestions dna={dna} context={{ ...suggestionContext, dna }} previewDna={previewDna} previewLabel={previewLabel} onPreview={(next,label)=>{ setPreviewDna(next); setPreviewLabel(label) }} onClearPreview={clearPreview} onCommit={commit}/></VerboseOnly>
 
     <div className="dna-layout visual-studio-layout"><div className="visual-controls">
       <Group number="01 · Theme" title="How the product lives in light and dark." badge="Quick"><div className="visual-grid two"><SelectField label="Theme behavior" value={dna.themeMode} options={selectOptions.themeMode} onChange={(themeMode)=>patch({themeMode})}/>{(dna.themeMode==='System'||dna.themeMode==='Light + Dark toggle') && <SelectField label="Default / fallback theme" value={dna.defaultTheme} options={selectOptions.defaultTheme} onChange={(defaultTheme)=>patch({defaultTheme})}/>}</div>{atLeast('Standard') && <div className="visual-grid two">{(dna.themeMode==='System'||dna.themeMode==='Light + Dark toggle') && <ToggleField label="Respect OS preference" checked={dna.respectOsPreference} onChange={(respectOsPreference)=>patch({respectOsPreference})}/>} {dna.themeMode==='Light + Dark toggle' && <ToggleField label="Remember preference" checked={dna.rememberThemePreference} onChange={(rememberThemePreference)=>patch({rememberThemePreference})}/>} {dna.themeMode==='Light + Dark toggle' && <SelectField label="Toggle placement" value={dna.themeTogglePlacement} options={selectOptions.themeTogglePlacement} onChange={(themeTogglePlacement)=>patch({themeTogglePlacement})}/>} {dna.themeMode!=='Light only' && <SelectField label="Dark palette strategy" value={dna.darkPaletteStrategy} options={selectOptions.darkPaletteStrategy} onChange={(darkPaletteStrategy)=>patch({darkPaletteStrategy})}/>}</div>}</Group>

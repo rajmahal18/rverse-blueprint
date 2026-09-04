@@ -326,7 +326,7 @@ export function deriveImplementationRoadmap(inputConfig: ProjectConfig, flows: C
   const needsOperations = scopeOn(config, 'admin.enabled') || scopeOn(config, 'pack.reporting') || scopeOn(config, 'workflow.enabled') || scopeOn(config, 'approval.enabled')
   let operations: RoadmapPhase | null = null
   if (needsOperations) {
-    const operationDeliverables = []
+    const operationDeliverables: string[] = []
     if (scopeOn(config, 'admin.enabled')) operationDeliverables.push('Admin/staff operational surfaces for the active domain only')
     if (scopeOn(config, 'workflow.enabled') || scopeOn(config, 'approval.enabled')) operationDeliverables.push('Traceable workflow/approval operations and state-transition controls')
     if (scopeOn(config, 'pack.reporting')) operationDeliverables.push('Reports/analytics based on authoritative domain data')

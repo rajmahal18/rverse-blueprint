@@ -2,6 +2,6 @@
 
 Archived phase handoffs, release notes, and prior release/migration context live here for reference only.
 
-Current implementation truth lives in the codebase plus the root-level `README.md`, `V024_REUSABLE_PRODUCT_ARCHITECTURE_HANDOFF.md`, `V024_REUSABLE_PRODUCT_ARCHITECTURE_RELEASE_NOTES.md`, and `APP_TYPE_MATURITY.md`. Do not treat an archived handoff as newer than the current source tree.
+Current implementation truth lives in the codebase, the root-level `README.md`, the current release handoff/release notes, and `APP_TYPE_MATURITY.md`. Do not treat an archived handoff as newer than the current source tree.
 
-Most recent archived release: v0.23 — Derived Implementation Roadmap.
+The archive currently covers legacy phases through v0.30. Root-level release documents newer than v0.30 are the active release trail until they are archived here.
