@@ -54,7 +54,7 @@ export type ReadinessReport = {
   dimensions: ReadinessDimension[]
 }
 
-export type RecommendationSource = 'Explicit' | 'Required' | 'Inferred' | 'App type' | 'Profile' | 'Operational scale' | 'Baseline' | 'Inactive'
+export type RecommendationSource = 'Explicit' | 'Required' | 'Suggested' | 'App type' | 'Profile' | 'Operational scale' | 'Baseline' | 'Inactive'
 
 export type RecommendationProvenance = {
   source: RecommendationSource
@@ -133,10 +133,9 @@ export function settingRecommendationProvenance(setting: ConfigSetting, config: 
 
   if (isScopeSetting(setting.id)) {
     const resolution = resolveScope(config, setting.id)
-    const source: RecommendationSource = resolution.source === 'Contextual'
-      ? 'App type'
-      : resolution.source
-    return { source, reason: resolution.reason, expected: resolution.effectiveValue, current }
+    const source: RecommendationSource = resolution.source === 'Suggested' ? 'Suggested' : resolution.source
+    const expectedScopeValue = resolution.state === 'suggested' ? expected : resolution.effectiveValue
+    return { source, reason: resolution.reason, expected: expectedScopeValue, current }
   }
 
   if (!settingIsActive(setting, config)) {
@@ -173,7 +172,7 @@ const signalIds = new Set([
 
 function appTypeMatchReason(appType: AppType, config: ProjectConfig) {
   const packs = configSettings
-    .filter((setting) => setting.section === 'business' && config.values[setting.id] === true)
+    .filter((setting) => setting.section === 'business' && resolveScope(config, setting.id).active)
     .map((setting) => setting.label)
   if (packs.length) return `Matches the current ${packs.slice(0, 2).join(' + ')} product shape.`
   const access = String(config.values['app.accessShape'] ?? '')
@@ -200,12 +199,12 @@ export function appTypeMatches(config: ProjectConfig): AppTypeMatch[] {
   }).sort((a, b) => b.score - a.score).slice(0, 3)
 }
 
-export function settingGuidance(setting: ConfigSetting, config: ProjectConfig): 'Recommended' | 'Optional' | 'Advanced' | 'Not recommended' | 'Required' | 'Inferred' | 'Inactive' {
+export function settingGuidance(setting: ConfigSetting, config: ProjectConfig): 'Recommended' | 'Suggested' | 'Optional' | 'Advanced' | 'Not recommended' | 'Required' | 'Inactive' {
   if (isScopeSetting(setting.id)) {
     const resolution = resolveScope(config, setting.id)
     if (resolution.choice === 'Off' && resolution.requiredBy.length) return 'Not recommended'
     if (resolution.source === 'Required') return 'Required'
-    if (resolution.source === 'Inferred') return 'Inferred'
+    if (resolution.source === 'Suggested') return 'Suggested'
     if (!resolution.active) return 'Inactive'
     if (resolution.choice === 'On') return 'Recommended'
   }
@@ -318,12 +317,66 @@ export function edgeCases(config: ProjectConfig): string[] {
 }
 
 
+export type ContextGapMode = 'Strict' | 'Balanced' | 'Proactive'
+export type ContextGapDecision = {
+  id: string
+  decision: string
+  reason: string
+  confidence: 'High' | 'Medium'
+  source: 'context_completion'
+  mode: ContextGapMode
+  status: 'applied' | 'held_for_scope'
+  relatedScope: string[]
+}
+
+function contextText(context: ProjectContext): string {
+  return projectContextEntries(context).map((entry) => entry.value).join(' ').toLowerCase()
+}
+
+function publicPresentationScopeActive(config: ProjectConfig): boolean {
+  return ['pack.portfolio', 'landing.enabled', 'pages.about', 'pages.features', 'pages.contact'].some((id) => {
+    const setting = configSettings.find((item) => item.id === id)
+    return Boolean(setting && isScopeSetting(setting.id) && resolveScope(config, setting.id).active)
+  })
+}
+
+/**
+ * Context completion may only resolve presentation/content/implementation-detail gaps.
+ * It deliberately has no path to set scopeChoices, values, or resolve a functional module active.
+ */
+export function contextGapDecisions(context: ProjectContext, config: ProjectConfig): ContextGapDecision[] {
+  const mode = String(effectiveConfigValue(config, 'intelligence.contextGapMode') ?? 'Balanced') as ContextGapMode
+  if (mode === 'Strict') return []
+  const text = contextText(context)
+  if (!text.trim()) return []
+
+  const has = (...patterns: RegExp[]) => patterns.some((pattern) => pattern.test(text))
+  const presentationReady = publicPresentationScopeActive(config)
+  const status: ContextGapDecision['status'] = presentationReady ? 'applied' : 'held_for_scope'
+  const relatedScope = ['pack.portfolio', 'landing.enabled']
+  const decisions: ContextGapDecision[] = []
+  const add = (id: string, decision: string, reason: string, confidence: 'High' | 'Medium' = 'High') => decisions.push({ id, decision, reason, confidence, source: 'context_completion', mode, status, relatedScope })
+
+  const physicalLocationIntent = has(/\b(?:shop|store|branch|office|clinic|venue) location\b/, /\bfind (?:the |our )?(?:shop|store|branch|office|location)\b/, /\bdirections?\b/, /\baddress\b/, /\bvisit (?:the |our )?(?:shop|store|branch|office)\b/)
+  const browseProductsIntent = has(/\bview (?:our )?products?\b/, /\bbrowse (?:our )?products?\b/, /\bshow(?:case)? (?:our )?products?\b/, /\bproduct categories\b/, /\bcar accessories\b/, /\bproducts? (?:and|or) services?\b/)
+  const contactIntent = has(/\bcontact (?:us|the shop|the store)\b/, /\breach (?:us|the shop|the store)\b/, /\bcall (?:us|the shop|the store)\b/, /\bdirections?\b/)
+  const websiteIntent = has(/\bwebsite\b/, /\bweb site\b/, /\bhomepage\b/, /\blanding page\b/, /\bpublic[- ]facing\b/, /\bmarketing site\b/)
+
+  if (physicalLocationIntent) add('context-gap-location-prominence', 'Give the physical location/store information a prominent place in the public presentation.', 'Finding the physical location is an explicit customer goal.')
+  if (browseProductsIntent) add('context-gap-product-imagery', 'Use image-led presentation for products/services instead of abstract or software-oriented imagery.', 'The context asks visitors to understand physical products/services visually.')
+  if (contactIntent || physicalLocationIntent) add('context-gap-contact-directions', 'Keep contact and directions actions easy to reach, including on mobile.', 'Contact/location is an explicit visitor task and should not be buried.')
+  if (websiteIntent && (browseProductsIntent || physicalLocationIntent)) add('context-gap-homepage-order', 'Infer a sensible homepage section order around the stated visitor goals rather than requiring every presentational section to be manually specified.', 'The intended public-site journey is clear enough to sequence low-risk presentation details.')
+  if (mode === 'Proactive' && websiteIntent) add('context-gap-placeholder-content', 'Create realistic placeholder copy/media for active public sections when final assets are missing, clearly treating them as placeholders.', 'Proactive mode may complete presentation detail so the interface can be judged as a finished composition.', 'Medium')
+
+  return decisions
+}
+
 export type ProjectContextReviewSignal = {
   id: string
   title: string
   detail: string
   targetSection: string
-  severity: 'advisory'
+  severity: 'advisory' | 'important'
   category: 'scope'
   affectedSettings: string[]
 }
@@ -333,10 +386,27 @@ export type ProjectContextReviewSignal = {
  * structured App Setup. These signals are review prompts only.
  */
 export function projectContextReviewSignals(context: ProjectContext, config: ProjectConfig): ProjectContextReviewSignal[] {
-  const text = projectContextEntries(context).map((entry) => entry.value).join(' ').toLowerCase()
+  const text = contextText(context)
   if (!text.trim()) return []
   const signals: ProjectContextReviewSignal[] = []
   const has = (...patterns: RegExp[]) => patterns.some((pattern) => pattern.test(text))
+
+  const publicWebsiteIntent = has(/\bwebsite\b/, /\bweb site\b/, /\bhomepage\b/, /\blanding page\b/, /\bmarketing site\b/, /\bpublic[- ]facing (?:site|website)\b/)
+  const publicBusinessContentIntent = has(
+    /\bcar accessories\b/, /\bphysical (?:shop|store)\b/, /\b(?:shop|store) location\b/, /\bfind (?:the |our )?(?:shop|store|location)\b/,
+    /\bview (?:our )?products?\b/, /\bbrowse (?:our )?products?\b/, /\bproduct categories\b/, /\bproducts? (?:and|or) services?\b/, /\bdirections?\b/
+  )
+  if ((publicWebsiteIntent && publicBusinessContentIntent) && !publicPresentationScopeActive(config)) {
+    signals.push({
+      id: 'context-recommended-setup-incomplete',
+      title: 'Recommended setup incomplete',
+      detail: 'Project intent may not be fully represented. You described a public business/marketing website where visitors should view offerings and/or find the physical location, but no corresponding public marketing/content scope is active. Review Portfolio & marketing and the public-site capabilities before implementation. Nothing has been activated automatically.',
+      targetSection: 'business',
+      severity: 'important',
+      category: 'scope',
+      affectedSettings: ['pack.portfolio', 'landing.enabled', 'pages.contact'],
+    })
+  }
 
   const commerceIntent = has(
     /\bonline shop(?:ping)?\b/, /\bonline store\b/, /\be-?commerce\b/, /\bshopping cart\b/, /\badd to cart\b/,
@@ -385,6 +455,38 @@ export function projectContextReviewSignals(context: ProjectContext, config: Pro
       category: 'scope',
       affectedSettings: ['pack.payments'],
     })
+  }
+
+  const hrmsIntent = has(
+    /\bhrms\b/, /\bhuman resources? (?:management )?system\b/, /\bhuman resource information system\b/, /\bhris\b/
+  )
+  if (hrmsIntent) {
+    const hrSignals = [
+      ['employee', /\bemployee records?\b|\bemployee profiles?\b|\bpersonnel records?\b/],
+      ['leave', /\bleave management\b|\bleave requests?\b|\bleave credits?\b/],
+      ['attendance', /\battendance\b|\btimekeeping\b|\btimesheets?\b/],
+      ['payroll', /\bpayroll\b|\bcompensation\b/],
+      ['recruitment', /\brecruitment\b|\bapplicant tracking\b|\bhiring\b/],
+      ['performance', /\bperformance management\b|\bperformance review\b|\bappraisal\b/],
+    ] as const
+    const hrCapabilityPattern = /employee|leave|attendance|payroll|recruit|performance|human.?resources|hrms|hris/i
+    const hrRepresented = configSettings.some((setting) => {
+      const descriptor = `${setting.id} ${setting.label} ${(setting.keywords ?? []).join(' ')}`
+      if (!hrCapabilityPattern.test(descriptor)) return false
+      return isScopeSetting(setting.id) ? resolveScope(config, setting.id).active : config.overrides.includes(setting.id)
+    })
+    const mentionedModules = hrSignals.filter(([, pattern]) => pattern.test(text)).map(([label]) => label)
+    if (!hrRepresented) {
+      signals.push({
+        id: 'context-hrms-structured-scope-mismatch',
+        title: 'Product intent may not be represented',
+        detail: `Project Context describes an HRMS${mentionedModules.length ? ` (${mentionedModules.join(', ')})` : ''}, but the current structured scope does not contain an explicit HR capability selection. Do not invent HR modules. Add/select the intended HR capabilities before implementation.`,
+        targetSection: 'business',
+        severity: 'important',
+        category: 'scope',
+        affectedSettings: [],
+      })
+    }
   }
 
   const reusableProductIntent = has(

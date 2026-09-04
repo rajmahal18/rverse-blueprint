@@ -17,6 +17,8 @@ export type OperationalScale = 'Auto' | 'Lean' | 'Standard' | 'High scale' | 'Mi
 export type ResolvedOperationalScale = Exclude<OperationalScale, 'Auto'>
 export type ConfigValue = string | boolean | number
 export type ScopeChoice = 'On' | 'Off'
+export type ResolutionState = 'off' | 'suggested' | 'on' | 'required'
+export type ActivationSource = 'explicit_user_selection' | 'required_dependency' | 'persisted_explicit_selection' | 'recommendation' | 'app_type_default' | 'system_baseline' | 'none'
 
 export type ConfigCondition = {
   id: string
@@ -129,7 +131,7 @@ export const configSections: ConfigSection[] = [
   { id: 'views', label: 'Tables, search & views', description: 'How records are browsed, filtered, sorted, grouped, searched, saved, exported, and handled at scale.' },
   { id: 'workflow', label: 'Workflow & approvals', description: 'Statuses, transitions, assignments, approvals, SLAs, escalations, tasks, and operational queues.' },
   { id: 'collaboration', label: 'Files & collaboration', description: 'Attachments, comments, mentions, activity history, record locking, and team collaboration behavior.' },
-  { id: 'business', label: 'Business packs', description: 'Turn domain packs on or off. The selected app type activates the relevant packs automatically; everything else stays hidden until needed.' },
+  { id: 'business', label: 'Business packs', description: 'Choose domain packs explicitly. App type may suggest relevant packs, but suggestions are never implementation scope until selected.' },
   { id: 'booking', label: 'Booking & scheduling', description: 'Resources, availability, slots, holds, rescheduling, cancellations, waitlists, and check-in behavior.' },
   { id: 'payments', label: 'Payments & money', description: 'Payment collection, verification, fees, deposits, refunds, receipts, disputes, and settlement behavior.' },
   { id: 'subscriptions', label: 'Subscriptions & SaaS billing', description: 'Plans, trials, seats, usage, plan changes, invoices, dunning, and customer billing self-service.' },
@@ -142,7 +144,9 @@ export const configSections: ConfigSection[] = [
   { id: 'clinic', label: 'Clinic & EMR', description: 'Patients, encounters, appointments, vitals, clinical notes, orders, labs, medicines, referrals, consent, and restricted records.' },
   { id: 'portfolio', label: 'Portfolio & marketing', description: 'Projects, case studies, media, services, profile content, contact, proof, and interactive work showcases.' },
   { id: 'operations', label: 'Admin & workflow', description: 'Administrative control, roles, approvals, notifications, and reporting.' },
-  { id: 'content', label: 'Content rules', description: 'Writing tone, AI-slop tolerance, labels, claims, helper copy, and product language.' },
+  { id: 'intelligence', label: 'Blueprint intelligence', description: 'How confidently Blueprint may fill low-risk presentation and implementation-detail gaps without creating product scope.' },
+  { id: 'media', label: 'Media assistance', description: 'Context-appropriate placeholder imagery used to make active product surfaces feel complete without inventing features.' },
+  { id: 'content', label: 'Content rules', description: 'Writing tone, AI-slop tolerance, audience-aware copy guardrails, labels, claims, helper copy, and product language.' },
   { id: 'support', label: 'Onboarding & help', description: 'First-use guidance, contextual help, feedback, support, and self-service troubleshooting.' },
   { id: 'quality', label: 'Security & quality', description: 'Security posture, accessibility, auditability, recovery, and validation.' },
   { id: 'delivery', label: 'Platform & delivery', description: 'High-level API, automation, offline, analytics, and deployment expectations retained as compatibility anchors.' },
@@ -2215,7 +2219,34 @@ export const configSettings: ConfigSetting[] = [
     caution: 'Impersonation needs explicit authorization and audit logging.',
   },
 
+  // Blueprint intelligence — presentation/detail inference only; never functional scope authority
+  {
+    id: 'intelligence.contextGapMode', section: 'intelligence', group: 'Context-aware gap filling', label: 'Context-aware gap filling', description: 'How Blueprint may complete obvious presentation or implementation-detail gaps from Project Context. This never activates optional functional modules.', kind: 'choice', defaultValue: 'Balanced',
+    options: [
+      { value: 'Strict', note: 'Never infer missing decisions. Surface a suggestion instead.' },
+      { value: 'Balanced', label: 'Balanced · Recommended', note: 'Fill only obvious low-risk presentation/detail gaps when confidence is high.' },
+      { value: 'Proactive', note: 'Fill more presentation/detail gaps while still requiring explicit authority for major functional scope.' },
+    ],
+  },
+
+  // Media assistance
+  {
+    id: 'media.generatePlaceholders', section: 'media', group: 'Placeholder imagery', label: 'Generate appropriate placeholder images', description: 'Create context-appropriate placeholder imagery when active screens need realistic media and final assets are not yet available.', kind: 'boolean', defaultValue: true,
+  },
+  {
+    id: 'media.placeholderStyle', section: 'media', group: 'Placeholder imagery', label: 'Placeholder image style', description: 'Preferred placeholder-media character. Auto lets Blueprint choose the most appropriate treatment from the product context and visual direction.', kind: 'choice', defaultValue: 'Auto / Recommended', dependsOn: { id: 'media.generatePlaceholders', equals: true },
+    options: [{ value: 'Auto / Recommended' }, { value: 'Realistic' }, { value: 'Studio product' }, { value: 'Editorial' }, { value: 'Illustration' }, { value: 'Technical' }, { value: 'Mixed' }], advanced: true,
+  },
+  {
+    id: 'media.placeholderCoverage', section: 'media', group: 'Placeholder imagery', label: 'Placeholder coverage', description: 'How broadly placeholder imagery should be used on active surfaces.', kind: 'choice', defaultValue: 'Appropriate coverage', dependsOn: { id: 'media.generatePlaceholders', equals: true },
+    options: [{ value: 'Minimal' }, { value: 'Appropriate coverage' }, { value: 'Rich presentation' }], advanced: true,
+  },
+
   // Content rules
+  {
+    id: 'content.publicCopyGuardrails', section: 'content', group: 'Audience-aware copy', label: 'Customer-facing copy guardrails', description: 'Keep implementation/developer terminology out of public customer-facing headings, labels, buttons, helper copy, empty states, and placeholder content.', kind: 'choice', defaultValue: 'Enforce',
+    options: [{ value: 'Enforce', note: 'Recommended. Public copy speaks to customers and avoids Blueprint/developer language.' }, { value: 'Review only', note: 'Allow drafting but surface developer/meta-language leakage for review.' }, { value: 'Off', note: 'No audience-language guardrail. Not recommended for public/customer-facing surfaces.' }],
+  },
   {
     id: 'content.aiSlop', section: 'content', group: 'AI-slop guardrails', label: 'AI-slop tolerance', description: 'How aggressively generated copy should avoid generic AI/SaaS phrasing and filler.', kind: 'choice', defaultValue: 'Low',
     options: [{ value: 'None' }, { value: 'Low' }, { value: 'Moderate' }, { value: 'High' }],
@@ -2577,10 +2608,13 @@ export function recommendedValue(setting: ConfigSetting, appType: AppType, profi
 export type ScopeResolution = {
   id: string
   choice: 'Auto' | ScopeChoice
+  state: ResolutionState
   active: boolean
-  source: 'Explicit' | 'Required' | 'Inferred' | 'Contextual' | 'Inactive'
+  source: 'Explicit' | 'Required' | 'Suggested' | 'Inactive'
+  activationSource: ActivationSource
   reason: string
   requiredBy: string[]
+  recommendationReason?: string
   effectiveValue: ConfigValue
 }
 
@@ -2687,26 +2721,16 @@ function dependencyChainContains(settingId: string, ancestorId: string, visited 
 
 function explicitChildRequires(config: ProjectConfig, scopeId: string): string | null {
   for (const id of config.overrides) {
-    if (id !== scopeId && dependencyChainContains(id, scopeId)) {
-      const child = configSettings.find((item) => item.id === id)
-      return child?.label ?? id
-    }
+    if (id === scopeId || isOffLike(config.values[id]) || !dependencyChainContains(id, scopeId)) continue
+    const child = configSettings.find((item) => item.id === id)
+    return child?.label ?? id
   }
-  for (const [id] of Object.entries(config.scopeChoices ?? {})) {
-    if (id !== scopeId && dependencyChainContains(id, scopeId)) {
-      const child = configSettings.find((item) => item.id === id)
-      return child?.label ?? id
-    }
+  for (const [id, choice] of Object.entries(config.scopeChoices ?? {})) {
+    if (choice !== 'On' || id === scopeId || !dependencyChainContains(id, scopeId)) continue
+    const child = configSettings.find((item) => item.id === id)
+    return child?.label ?? id
   }
   return null
-}
-
-function explicitOn(config: ProjectConfig, id: string): boolean {
-  return config.scopeChoices?.[id] === 'On'
-}
-
-function explicitOff(config: ProjectConfig, id: string): boolean {
-  return config.scopeChoices?.[id] === 'Off'
 }
 
 function explicitValue(config: ProjectConfig, id: string): ConfigValue | undefined {
@@ -2745,10 +2769,10 @@ function scopeRequirements(config: ProjectConfig, id: string, stack: Set<string>
   if (id === 'pack.payments') {
     if (activeScope('pack.subscriptions')) requiredBy.push('Subscriptions')
     if (activeScope('pack.commerce')) requiredBy.push('E-commerce checkout')
-    if (activeScope('pack.booking') && raw('booking.paymentPolicy') !== 'No payment') requiredBy.push('Booking payment requirement')
+    if (activeScope('pack.booking') && config.overrides.includes('booking.paymentPolicy') && raw('booking.paymentPolicy') !== 'No payment') requiredBy.push('Explicit booking payment requirement')
   }
 
-  if (id === 'pack.inventory' && activeScope('pack.clinic') && raw('clinic.inventoryLink') !== 'Off') requiredBy.push('Clinic stock integration')
+  if (id === 'pack.inventory' && activeScope('pack.clinic') && config.overrides.includes('clinic.inventoryLink') && raw('clinic.inventoryLink') !== 'Off') requiredBy.push('Explicit clinic stock integration')
   if (id === 'workflow.enabled' && activeScope('approval.enabled')) requiredBy.push('Approvals')
   if (id === 'notifications.level') {
     if (config.scopeChoices?.['pages.notifications'] === 'On') requiredBy.push('Notification center')
@@ -2783,13 +2807,9 @@ function customAutoInference(config: ProjectConfig, id: string, stack: Set<strin
   if (id === 'roles.level' && activeScope('admin.enabled') && (activeScope('records.crud') || activeScope('workflow.enabled') || operationalPackIds(config, stack).length > 0)) return { active: true, reason: 'Protected operational administration needs explicit authorization roles.' }
   if (id === 'records.crud' && operationalPackIds(config, stack).some((pack) => !['pack.reporting'].includes(pack))) return { active: true, reason: 'An active business pack needs persistent domain records.' }
   if (id === 'forms.enabled' && (activeScope('records.crud') || activeScope('registration.mode'))) return { active: true, reason: 'Active records/account onboarding require structured input.' }
-  if (id === 'workflow.enabled' && (activeScope('pack.government') || activeScope('pack.clinic'))) return { active: true, reason: 'The active domain pack requires explicit state transitions.' }
-  if (id === 'approval.enabled' && activeScope('pack.government')) return { active: true, reason: 'Government workflow normally requires controlled approvals.' }
-  if (id === 'admin.enabled' && operationalPackIds(config, stack).some((pack) => !['pack.reporting'].includes(pack))) return { active: true, reason: 'The active business pack needs protected operational administration.' }
+  if (id === 'workflow.enabled' && activeScope('pack.government')) return { active: true, reason: 'Government document routing requires explicit state transitions.' }
   if (id === 'search.level' && activeScope('pack.directory')) return { active: true, reason: 'Directory discovery requires search.' }
   if (id === 'pages.profile' && activeScope('profile.enabled')) return { active: true, reason: 'An active user profile needs a dedicated account surface.' }
-  if (id === 'pages.accountSettings' && activeScope('login.enabled')) return { active: true, reason: 'Signed-in users need a basic account-settings surface.' }
-  if (id === 'pages.notifications' && activeScope('notifications.level') && activeScope('login.enabled')) return { active: true, reason: 'Signed-in notifications benefit from a durable inbox.' }
   if (id === 'pages.search' && activeScope('search.level')) return { active: true, reason: 'Active global search needs a results destination.' }
   if (id === 'notifications.level' && (activeScope('integration.email') || activeScope('integration.sms') || activeScope('integration.push'))) return { active: true, reason: 'An enabled delivery channel needs notification events.' }
   if (id === 'quality.backups' || id === 'eng.dbEngine') {
@@ -2877,7 +2897,18 @@ export function resolveScope(config: ProjectConfig, id: string, stack = new Set<
   }
   if (!setting || !scopeSettingIds.has(canonical)) {
     const raw = config.values[id]
-    return done({ id, choice: 'Auto', active: !isOffLike(raw), source: !isOffLike(raw) ? 'Contextual' : 'Inactive', reason: 'This is not a scope-level switch.', requiredBy: [], effectiveValue: raw })
+    const active = !isOffLike(raw)
+    return done({
+      id,
+      choice: 'Auto',
+      state: active ? 'on' : 'off',
+      active,
+      source: active ? 'Explicit' : 'Inactive',
+      activationSource: active ? 'system_baseline' : 'none',
+      reason: 'This is not a scope-level switch.',
+      requiredBy: [],
+      effectiveValue: raw,
+    })
   }
   if (setting.dependsOn && !scopeParentConditionMatches(setting.dependsOn, config, stack)) {
     const choice = scopeChoice(config, canonical)
@@ -2885,17 +2916,29 @@ export function resolveScope(config: ProjectConfig, id: string, stack = new Set<
     return done({
       id: canonical,
       choice,
+      state: 'off',
       active: false,
       source: choice === 'Auto' ? 'Inactive' : 'Explicit',
+      activationSource: 'none',
       reason: `${parent?.label ?? setting.dependsOn.id} is inactive, so this dependent feature cannot apply.`,
       requiredBy: choice === 'On' ? [parent?.label ?? setting.dependsOn.id] : [],
       effectiveValue: settingOffValue(setting),
     })
   }
+  // Cycles must fail closed. Recommendations are never allowed to become active scope merely
+  // because a resolver branch needs a fallback value.
   if (stack.has(canonical)) {
-    const fallback = recommendedValue(setting, config.appType, config.profile, config.operationalScale)
-    const active = scopeValueIsActive(setting, fallback)
-    return done({ id: canonical, choice: scopeChoice(config, canonical), active, source: active ? 'Contextual' : 'Inactive', reason: 'Resolved from the contextual fallback.', requiredBy: [], effectiveValue: active ? fallback : settingOffValue(setting) })
+    return done({
+      id: canonical,
+      choice: scopeChoice(config, canonical),
+      state: 'off',
+      active: false,
+      source: 'Inactive',
+      activationSource: 'none',
+      reason: 'Circular scope resolution fell back to inactive.',
+      requiredBy: [],
+      effectiveValue: settingOffValue(setting),
+    })
   }
   const nextStack = new Set(stack)
   nextStack.add(canonical)
@@ -2906,36 +2949,89 @@ export function resolveScope(config: ProjectConfig, id: string, stack = new Set<
     return done({
       id: canonical,
       choice,
+      state: 'off',
       active: false,
       source: 'Explicit',
+      activationSource: 'none',
       reason: requiredBy.length ? `Explicitly off, but required by ${requiredBy.join(', ')}.` : 'Explicitly excluded from scope.',
       requiredBy,
       effectiveValue: settingOffValue(setting),
     })
   }
   if (choice === 'On') {
-    return done({ id: canonical, choice, active: true, source: 'Explicit', reason: 'Explicitly included in scope.', requiredBy, effectiveValue: activeScopeValue(setting, config) })
+    return done({
+      id: canonical,
+      choice,
+      state: 'on',
+      active: true,
+      source: 'Explicit',
+      activationSource: 'explicit_user_selection',
+      reason: 'Explicitly included in scope.',
+      requiredBy,
+      effectiveValue: activeScopeValue(setting, config),
+    })
   }
   if (requiredBy.length) {
-    return done({ id: canonical, choice, active: true, source: 'Required', reason: `Required by ${requiredBy.join(', ')}.`, requiredBy, effectiveValue: activeScopeValue(setting, config) })
+    return done({
+      id: canonical,
+      choice,
+      state: 'required',
+      active: true,
+      source: 'Required',
+      activationSource: 'required_dependency',
+      reason: `Required by ${requiredBy.join(', ')}.`,
+      requiredBy,
+      effectiveValue: activeScopeValue(setting, config),
+    })
   }
 
-  if (config.appType === 'Custom / General') {
-    const inference = customAutoInference(config, canonical, nextStack)
-    if (inference?.active) return done({ id: canonical, choice, active: true, source: 'Inferred', reason: inference.reason, requiredBy, effectiveValue: activeScopeValue(setting, config) })
-    return done({ id: canonical, choice, active: false, source: 'Inactive', reason: 'Auto is neutral for Custom / General until another decision needs this feature.', requiredBy, effectiveValue: settingOffValue(setting) })
+  // Explicit structured decisions may create a hard dependency regardless of app type.
+  const inference = customAutoInference(config, canonical, nextStack)
+  if (inference?.active) {
+    return done({
+      id: canonical,
+      choice,
+      state: 'required',
+      active: true,
+      source: 'Required',
+      activationSource: 'required_dependency',
+      reason: inference.reason,
+      requiredBy: [],
+      effectiveValue: activeScopeValue(setting, config),
+    })
   }
 
-  const contextual = recommendedValue(setting, config.appType, config.profile, config.operationalScale)
-  const active = scopeValueIsActive(setting, contextual)
+  // App-type/profile recommendations remain advisory. SUGGESTED != ON.
+  const recommended = recommendedValue(setting, config.appType, config.profile, config.operationalScale)
+  const recommendedActive = scopeValueIsActive(setting, recommended)
+  if (config.appType !== 'Custom / General' && recommendedActive) {
+    const appSpecific = setting.appDefaults?.[config.appType] !== undefined
+    return done({
+      id: canonical,
+      choice,
+      state: 'suggested',
+      active: false,
+      source: 'Suggested',
+      activationSource: appSpecific ? 'app_type_default' : 'recommendation',
+      reason: `Suggested for ${config.appType}; not included until explicitly selected.`,
+      recommendationReason: appSpecific ? `App-type recommendation for ${config.appType}.` : 'General Blueprint recommendation for this product shape.',
+      requiredBy: [],
+      effectiveValue: settingOffValue(setting),
+    })
+  }
+
   return done({
     id: canonical,
     choice,
-    active,
-    source: active ? 'Contextual' : 'Inactive',
-    reason: active ? `Recommended for ${config.appType}.` : `Not needed by the ${config.appType} baseline.`,
-    requiredBy,
-    effectiveValue: active ? activeScopeValue(setting, config) : settingOffValue(setting),
+    state: 'off',
+    active: false,
+    source: 'Inactive',
+    activationSource: 'none',
+    reason: config.appType === 'Custom / General'
+      ? 'Not included. Custom / General stays neutral until you explicitly select scope or another explicit decision requires it.'
+      : `Not included in the ${config.appType} scope.`,
+    requiredBy: [],
+    effectiveValue: settingOffValue(setting),
   })
 }
 
@@ -3295,6 +3391,29 @@ export function formatConfigValue(value: ConfigValue): string {
   return String(value)
 }
 
+export type ScopeIntegrityDiagnostic = {
+  id: string
+  label: string
+  detectedSource: ActivationSource
+  resolution: 'removed_from_active_scope'
+  detail: string
+}
+
+export function scopeIntegrityDiagnostics(config: ProjectConfig): ScopeIntegrityDiagnostic[] {
+  const valid = new Set<ActivationSource>(['explicit_user_selection', 'persisted_explicit_selection', 'required_dependency'])
+  return configSettings
+    .filter((setting) => isScopeSetting(setting.id))
+    .map((setting) => ({ setting, resolution: resolveScope(config, setting.id) }))
+    .filter(({ resolution }) => resolution.active && !valid.has(resolution.activationSource))
+    .map(({ setting, resolution }) => ({
+      id: setting.id,
+      label: setting.label,
+      detectedSource: resolution.activationSource,
+      resolution: 'removed_from_active_scope' as const,
+      detail: `${setting.label} resolved active without valid scope authority (${resolution.activationSource}).`,
+    }))
+}
+
 export function configWarnings(config: ProjectConfig): string[] {
   const warnings: string[] = []
   const value = (id: string) => effectiveConfigValue(config, id)
@@ -3303,6 +3422,7 @@ export function configWarnings(config: ProjectConfig): string[] {
     return setting ? settingIsActive(setting, config) : false
   }
   warnings.push(...scopeConflicts(config))
+  warnings.push(...scopeIntegrityDiagnostics(config).map((diagnostic) => `SCOPE INTEGRITY ERROR: ${diagnostic.detail} Resolution: removed from active implementation scope.`))
   if (value('admin.enabled') === true && value('login.enabled') === false) warnings.push('Admin panel is enabled while login is disabled. Protect administrative routes with authentication.')
   if (active('login.passwordPolicy') && value('login.passwordPolicy') === 'No restrictions') warnings.push('Password policy is set to “No restrictions.” This is intentionally outside the recommended baseline.')
   if (active('login.passwordPolicy') && value('login.passwordPolicy') === 'Legacy composition rules') warnings.push('Legacy password composition rules are selected. Prefer modern length/blocklist/password-manager-friendly requirements unless a legacy policy is mandatory.')
@@ -3335,11 +3455,12 @@ export function configWarnings(config: ProjectConfig): string[] {
   if (value('platform.offline') === 'Offline write + sync' && value('platform.pwa') === false) warnings.push('Offline write + sync is selected without an installable PWA. That can work, but requires an explicit caching/sync architecture.')
   if (value('app.accessShape') === 'Private' && value('landing.enabled') === true) warnings.push('This product is marked Private but still has a dedicated public landing page. Keep it only if you intentionally want a branded pre-login entry surface.')
   if (publicIdentitySignal(config) && resolveScope(config, 'seo.enabled').active === false && scopeChoice(config, 'seo.enabled') === 'Auto') warnings.push('This project is explicitly shaped as a public website but search-engine discoverability is still Auto → Off. Confirm that noindex is intentional or turn SEO On.')
-  const entryDestinationIsIntentional = config.appType !== 'Custom / General' || config.overrides.includes('app.startDestination')
+  const entryDestinationIsIntentional = config.overrides.includes('app.startDestination')
   if (entryDestinationIsIntentional && value('app.startDestination') === 'Landing page' && value('landing.enabled') === false) warnings.push('Default entry destination is Landing page, but the landing page is disabled.')
   if (entryDestinationIsIntentional && value('app.startDestination') === 'Login' && value('login.enabled') === false) warnings.push('Default entry destination is Login, but login is disabled.')
   if (entryDestinationIsIntentional && value('app.startDestination') === 'Dashboard' && value('dashboard.enabled') === false) warnings.push('Default entry destination is Dashboard, but the dashboard is disabled.')
   if (value('ux.modalPolicy') === 'Avoid modals' && value('ux.formOverlay') === 'Modal for short forms') warnings.push('Modal policy says to avoid modals, but short forms are configured to open in modals.')
+  if (publicIdentitySignal(config) && value('content.publicCopyGuardrails') === 'Off') warnings.push('Audience-aware copy guardrails are disabled for a customer-facing/public product surface. Developer or Blueprint language may leak into production copy.')
   if (value('content.fakeProof') !== 'Never fabricate') warnings.push('Synthetic proof placeholders are allowed in development. Make sure they are visibly marked and cannot ship as real testimonials, metrics, ratings, or logos.')
   if (value('landing.appBadges') === 'PWA install cue' && value('platform.pwa') === false) warnings.push('Landing page shows a PWA install cue, but installable PWA is disabled.')
   if (active('forms.serverValidation') && value('forms.serverValidation') === false) warnings.push('Server-side form validation is disabled. Client validation alone is not a trusted enforcement boundary.')

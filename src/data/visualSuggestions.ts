@@ -345,12 +345,20 @@ export function previewColorScheme(dna: Dna, schemeValue: ColorScheme) {
   return normalizeDna({ ...dna, palette: schemeValue.light, darkPalette: schemeValue.dark, colorSchemeOrigin: schemeValue.name })
 }
 
+function directionWeightProvenance(patch: Partial<Dna>): Partial<Dna> {
+  return {
+    ...(patch.headingWeight !== undefined ? { headingWeightPreference: 'Auto / Recommended' as const } : {}),
+    ...(patch.bodyWeight !== undefined ? { bodyWeightPreference: 'Auto / Recommended' as const } : {}),
+    ...(patch.uiWeight !== undefined ? { uiWeightPreference: 'Auto / Recommended' as const } : {}),
+  }
+}
+
 export function applyDirectionCategory(dna: Dna, direction: VisualDirection, categoryId: DirectionCategoryId) {
   const found = direction.categories.find((item) => item.id === categoryId)
-  return found ? normalizeDna({ ...dna, ...found.patch }) : normalizeDna(dna)
+  return found ? normalizeDna({ ...dna, ...found.patch, ...directionWeightProvenance(found.patch) }) : normalizeDna(dna)
 }
 
 export function applyFullDirection(dna: Dna, direction: VisualDirection) {
   const patch = Object.assign({}, ...direction.categories.map((item) => item.patch)) as Partial<Dna>
-  return normalizeDna({ ...dna, ...patch })
+  return normalizeDna({ ...dna, ...patch, ...directionWeightProvenance(patch) })
 }

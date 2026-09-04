@@ -49,7 +49,9 @@ check('neutral Custom / General does not invent workflow starters', () => {
 })
 
 check('booking starters are suggestions derived only from already-active scope', () => {
-  const config = createProjectConfig('Booking / Scheduling')
+  let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
+  config = setScopeChoice(config, 'pack.payments', 'On')
   const ids = suggestedCoreFlowTemplates(config).map((item) => item.templateId)
   assert.ok(ids.includes('booking-customer'))
   assert.ok(ids.includes('payment-checkout'))
@@ -57,6 +59,7 @@ check('booking starters are suggestions derived only from already-active scope',
 
 check('explicit payment Off removes the payment starter without affecting booking', () => {
   let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
   config = setScopeChoice(config, 'pack.payments', 'Off')
   const ids = suggestedCoreFlowTemplates(config).map((item) => item.templateId)
   assert.ok(ids.includes('booking-customer'))
@@ -64,7 +67,8 @@ check('explicit payment Off removes the payment starter without affecting bookin
 })
 
 check('creating a starter does not mutate the source configuration', () => {
-  const config = createProjectConfig('Booking / Scheduling')
+  let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
   const before = JSON.stringify(config)
   const template = starter(config, 'booking-customer')
   assert.ok(template)
@@ -96,7 +100,8 @@ check('flow quality requires actor, goal, starting point, two steps, success sta
 })
 
 check('booking starter is implementation-ready and includes recovery behavior', () => {
-  const config = createProjectConfig('Booking / Scheduling')
+  let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
   const template = starter(config, 'booking-customer')
   assert.ok(template)
   const flow = coreFlowFromTemplate(template)
@@ -122,7 +127,8 @@ check('AI flow prompt refuses to invent major workflow when no flows are authore
 })
 
 check('AI flow prompt includes actor, goal, main path, success, and recovery for authored flows', () => {
-  const config = createProjectConfig('Clinic / EMR')
+  let config = createProjectConfig('Clinic / EMR')
+  config = setScopeChoice(config, 'pack.clinic', 'On')
   const template = starter(config, 'clinic-encounter')
   assert.ok(template)
   const output = coreFlowsPrompt([coreFlowFromTemplate(template)])
@@ -135,7 +141,8 @@ check('AI flow prompt includes actor, goal, main path, success, and recovery for
 
 
 check('authored flows extend acceptance criteria without changing App Setup scope', () => {
-  const config = createProjectConfig('Booking / Scheduling')
+  let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
   const template = starter(config, 'booking-customer')
   assert.ok(template)
   const flow = coreFlowFromTemplate(template)

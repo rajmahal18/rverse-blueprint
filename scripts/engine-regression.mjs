@@ -124,83 +124,45 @@ check('declared defaults are valid for their setting kind/options', () => {
 })
 
 const baselineScenarios = [
-  {
-    name: 'Custom / General stays neutral', appType: 'Custom / General', scale: 'Standard',
-    on: [],
-    off: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'workflow.enabled', 'pack.booking', 'pack.payments', 'pack.commerce', 'pack.inventory', 'pack.directory', 'pack.government', 'pack.clinic', 'pack.tournament'],
-  },
-  {
-    name: 'Booking / Scheduling is transactional but lean in collaboration', appType: 'Booking / Scheduling', scale: 'Standard',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'pack.booking', 'pack.payments', 'pack.reporting', 'quality.backups'],
-    off: ['workflow.enabled', 'approval.enabled', 'attachments.enabled', 'integration.externalAutomation'],
-    values: { 'booking.conflictPolicy': 'Atomic conflict rejection', 'payments.verification': 'Server/webhook verified', 'payments.webhookIdempotency': true },
-  },
-  {
-    name: 'Internal / Operations enables controlled workflow', appType: 'Internal / Operations', scale: 'Standard',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'workflow.enabled', 'approval.enabled', 'attachments.enabled', 'pack.reporting'],
-    off: ['pack.booking', 'pack.payments', 'pack.commerce', 'pack.inventory', 'pack.directory'],
-  },
-  {
-    name: 'SaaS / Client Portal enables subscriptions without generic workflow', appType: 'SaaS / Client Portal', scale: 'Standard',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'pack.payments', 'pack.subscriptions', 'pack.reporting'],
-    off: ['workflow.enabled', 'approval.enabled', 'attachments.enabled', 'pack.commerce'],
-  },
-  {
-    name: 'E-commerce enables checkout and single-location inventory baseline', appType: 'E-commerce', scale: 'Lean',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'pack.payments', 'pack.commerce', 'pack.inventory', 'pack.reporting'],
-    off: ['workflow.enabled', 'approval.enabled', 'pack.subscriptions'],
-    values: { 'inventory.locations': 'Single location' },
-  },
-  {
-    name: 'Directory / Marketplace does not assume transactions', appType: 'Directory / Marketplace', scale: 'Lean',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'search.level', 'pack.directory', 'pack.reporting'],
-    off: ['pack.payments', 'pack.commerce', 'workflow.enabled', 'approval.enabled'],
-  },
-  {
-    name: 'Portfolio / Marketing remains public and non-operational', appType: 'Portfolio / Marketing', scale: 'Lean',
-    on: [],
-    off: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'workflow.enabled', 'pack.payments', 'pack.reporting', 'quality.backups', 'eng.dbEngine'],
-  },
-  {
-    name: 'Government System resolves mission-critical workflow safeguards', appType: 'Government System', scale: 'Mission critical',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'workflow.enabled', 'approval.enabled', 'attachments.enabled', 'pack.government', 'pack.reporting', 'quality.backups'],
-    off: ['pack.payments', 'pack.commerce'],
-    values: { 'login.mfa': 'Required for admins', 'permissions.enforcement': 'Server enforced + UI reflects access' },
-  },
-  {
-    name: 'Clinic / EMR resolves mission-critical clinical safeguards', appType: 'Clinic / EMR', scale: 'Mission critical',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'workflow.enabled', 'attachments.enabled', 'pack.clinic', 'pack.reporting', 'quality.backups'],
-    off: ['approval.enabled', 'pack.payments', 'pack.commerce'],
-    values: { 'login.mfa': 'Required for admins', 'permissions.enforcement': 'Server enforced + UI reflects access' },
-  },
-  {
-    name: 'Inventory / POS supports multi-location operations', appType: 'Inventory / POS', scale: 'Standard',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'pack.inventory', 'pack.payments', 'pack.reporting', 'quality.backups'],
-    off: ['workflow.enabled', 'approval.enabled'],
-    values: { 'inventory.locations': 'Multiple locations', 'inventory.transfers': 'Transfer + receive' },
-  },
-  {
-    name: 'Tournament / Event enables event operations without generic workflow', appType: 'Tournament / Event', scale: 'Lean',
-    on: ['login.enabled', 'admin.enabled', 'records.crud', 'forms.enabled', 'pack.tournament', 'pack.reporting'],
-    off: ['workflow.enabled', 'approval.enabled', 'attachments.enabled', 'pack.payments'],
-  },
+  { name: 'Custom / General stays neutral', appType: 'Custom / General', scale: 'Standard', suggested: [] },
+  { name: 'Booking / Scheduling recommends without activating', appType: 'Booking / Scheduling', scale: 'Standard', suggested: ['pack.booking', 'pack.payments', 'pack.reporting'] },
+  { name: 'Internal / Operations recommends without activating', appType: 'Internal / Operations', scale: 'Standard', suggested: ['pack.reporting'] },
+  { name: 'SaaS / Client Portal recommends without activating', appType: 'SaaS / Client Portal', scale: 'Standard', suggested: ['pack.subscriptions', 'pack.reporting'] },
+  { name: 'E-commerce recommends without activating', appType: 'E-commerce', scale: 'Lean', suggested: ['pack.commerce', 'pack.inventory', 'pack.reporting'] },
+  { name: 'Directory / Marketplace recommends without activating', appType: 'Directory / Marketplace', scale: 'Lean', suggested: ['pack.directory', 'pack.reporting'] },
+  { name: 'Portfolio / Marketing remains advisory and non-operational', appType: 'Portfolio / Marketing', scale: 'Lean', suggested: [] },
+  { name: 'Government System recommends document workflow without activating it', appType: 'Government System', scale: 'Mission critical', suggested: ['pack.government', 'pack.reporting'] },
+  { name: 'Clinic / EMR recommends clinical packs without activating them', appType: 'Clinic / EMR', scale: 'Mission critical', suggested: ['pack.clinic', 'pack.reporting'] },
+  { name: 'Inventory / POS recommends inventory without activating it', appType: 'Inventory / POS', scale: 'Standard', suggested: ['pack.inventory', 'pack.payments', 'pack.reporting'] },
+  { name: 'Tournament / Event recommends event operations without activating them', appType: 'Tournament / Event', scale: 'Lean', suggested: ['pack.tournament', 'pack.reporting'] },
 ]
 
 for (const scenario of baselineScenarios) {
   check(`scenario: ${scenario.name}`, () => {
     const config = createProjectConfig(scenario.appType, 'Recommended', 'Auto')
     assert.equal(inferredOperationalScale(scenario.appType), scenario.scale)
-    expectScope(config, scenario.on, scenario.off)
-    for (const [id, expected] of Object.entries(scenario.values ?? {})) expectValue(config, id, expected)
-    assert.deepEqual(configWarnings(config), [], `${scenario.appType} default baseline should have no warnings`)
-    assert.equal(configReadiness(config).label, 'Ready')
+    const activeScope = configSettings
+      .filter((item) => isScopeSetting(item.id) && !isRedundantSetting(item.id))
+      .filter((item) => resolveScope(config, item.id).active)
+      .map((item) => item.id)
+    assert.deepEqual(activeScope, [], `${scenario.appType} defaults must not activate optional functional scope`)
+    for (const id of scenario.suggested) {
+      const resolution = resolveScope(config, id)
+      assert.equal(resolution.state, 'suggested', `${id} should remain advisory`)
+      assert.equal(resolution.active, false, `${id} suggestion must not become implementation scope`)
+      assert.ok(['app_type_default', 'recommendation'].includes(resolution.activationSource), `${id} should retain recommendation provenance`)
+    }
+    assert.ok(!configWarnings(config).some((warning) => warning.includes('SCOPE INTEGRITY ERROR')), `${scenario.appType} should have no scope-integrity failure`)
+    assert.notEqual(configReadiness(config).label, 'Not ready')
   })
 }
 
-check('all recommended app types are warning-free by default', () => {
+check('recommended app types never silently activate optional scope', () => {
   for (const { value: appType } of appTypes) {
-    const warnings = configWarnings(createProjectConfig(appType, 'Recommended', 'Auto'))
-    assert.deepEqual(warnings, [], `${appType} has baseline warnings: ${warnings.join(' | ')}`)
+    const config = createProjectConfig(appType, 'Recommended', 'Auto')
+    const activeScope = configSettings.filter((item) => isScopeSetting(item.id) && !isRedundantSetting(item.id) && resolveScope(config, item.id).active)
+    assert.deepEqual(activeScope, [], `${appType} silently activated: ${activeScope.map((item) => item.id).join(', ')}`)
+    assert.ok(!configWarnings(config).some((warning) => warning.includes('SCOPE INTEGRITY ERROR')))
   }
 })
 
@@ -231,7 +193,7 @@ check('real-world scenario: a custom cash-only booking app can keep Payments exp
   config = setScopeChoice(config, 'pack.booking', 'On')
   config = setConfigValue(config, 'booking.paymentPolicy', 'No payment')
   config = setScopeChoice(config, 'pack.payments', 'Off')
-  expectScope(config, ['pack.booking', 'admin.enabled', 'records.crud', 'forms.enabled'], ['pack.payments'])
+  expectScope(config, ['pack.booking', 'records.crud', 'forms.enabled'], ['admin.enabled', 'pack.payments'])
   assert.ok(!configWarnings(config).some((warning) => warning.includes('Booking requires payment')))
 })
 
@@ -241,7 +203,8 @@ check('intentional scale mismatches produce review signals instead of silently c
   assert.ok(configWarnings(portfolio).some((warning) => warning.includes('Mission critical operational scale')))
 
   const clinic = createProjectConfig('Clinic / EMR', 'Recommended', 'Lean')
-  assert.equal(scopeOn(clinic, 'pack.clinic'), true)
+  assert.equal(scopeOn(clinic, 'pack.clinic'), false)
+  assert.equal(resolveScope(clinic, 'pack.clinic').state, 'suggested')
   assert.ok(configWarnings(clinic).some((warning) => warning.includes('Lean operational scale')))
 })
 
@@ -252,8 +215,10 @@ check('behavioral defaults never create product scope by themselves', () => {
   assert.equal(settingIncludedInContract(setting('booking.conflictPolicy'), config), false)
 })
 
-check('explicit Off wins over inference and surfaces a dependency conflict', () => {
-  const booking = createProjectConfig('Booking / Scheduling')
+check('explicit Off wins over required dependency and surfaces a conflict', () => {
+  let booking = createProjectConfig('Booking / Scheduling')
+  booking = setScopeChoice(booking, 'pack.booking', 'On')
+  booking = setConfigValue(booking, 'booking.paymentPolicy', 'Deposit required')
   const config = setScopeChoice(booking, 'pack.payments', 'Off')
   const resolution = resolveScope(config, 'pack.payments')
   assert.equal(resolution.active, false)
@@ -291,7 +256,8 @@ check('changing Operational Scale never creates business scope', () => {
 })
 
 check('single-location inventory excludes inter-location transfer behavior from the contract', () => {
-  const config = createProjectConfig('E-commerce')
+  let config = createProjectConfig('E-commerce')
+  config = setScopeChoice(config, 'pack.inventory', 'On')
   assert.equal(value(config, 'inventory.locations'), 'Single location')
   assert.equal(settingIsActive('inventory.transfers', config), false)
   assert.equal(settingIncludedInContract(setting('inventory.transfers'), config), false)
@@ -308,6 +274,7 @@ check('admin defaults always have a protected login and server-side authorizatio
 
 check('unsafe payment verification produces a review signal and a deterministic quick fix', () => {
   let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.payments', 'On')
   config = setConfigValue(config, 'payments.verification', 'Client return / redirect only')
   assert.ok(configWarnings(config).some((warning) => warning.includes('browser return/redirect')))
   const fix = configQuickFixes(config).find((item) => item.id === 'payment-authority')
@@ -328,6 +295,7 @@ check('unsafe booking conflict handling produces a quick fix', () => {
 
 check('explicitly disabling login while admin is active never gets silently overridden', () => {
   let config = createProjectConfig('Internal / Operations')
+  config = setScopeChoice(config, 'admin.enabled', 'On')
   config = setScopeChoice(config, 'login.enabled', 'Off')
   assert.equal(scopeOn(config, 'login.enabled'), false)
   assert.equal(scopeOn(config, 'admin.enabled'), true)
@@ -372,7 +340,9 @@ check('neutral Custom app type does not claim an app-type match without meaningf
 check('cross-layer payment capability follows resolved payment scope', () => {
   const payment = capabilities.find((item) => item.id === 'payment')
   assert.ok(payment)
-  assert.equal(capabilityApplicability(payment, createProjectConfig('Booking / Scheduling')).compatible, true)
+  let booking = createProjectConfig('Booking / Scheduling')
+  booking = setScopeChoice(booking, 'pack.payments', 'On')
+  assert.equal(capabilityApplicability(payment, booking).compatible, true)
   assert.equal(capabilityApplicability(payment, createProjectConfig('Portfolio / Marketing')).compatible, false)
 })
 

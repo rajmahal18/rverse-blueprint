@@ -58,8 +58,18 @@ check('neutral Custom / General gets only cross-cutting phases and invents no pr
   assert.ok(!phaseById(result, 'foundation').deliverables.some((item) => /data model|migration/i.test(item)))
 })
 
-check('Booking / Scheduling derives booking domain before integration and release', () => {
-  const result = deriveImplementationRoadmap(createProjectConfig('Booking / Scheduling'), [])
+check('Government recommendation never creates a document-routing roadmap phase', () => {
+  const config = createProjectConfig('Government System')
+  const result = deriveImplementationRoadmap(config, [])
+  assert.equal(phaseIds(result).includes('domain-government'), false)
+  assert.equal(result.phases.some((phase) => /document routing|government document/i.test(`${phase.title} ${phase.deliverables.join(' ')}`)), false)
+})
+
+check('explicit Booking scope derives booking domain before integration and release', () => {
+  let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
+  config = setScopeChoice(config, 'pack.payments', 'On')
+  const result = deriveImplementationRoadmap(config, [])
   const ids = phaseIds(result)
   assert.ok(ids.includes('domain-booking'))
   assert.ok(ids.includes('integrations'))
@@ -70,6 +80,7 @@ check('Booking / Scheduling derives booking domain before integration and releas
 
 check('explicit Payments Off removes payment integration proof without removing booking domain', () => {
   let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
   config = setScopeChoice(config, 'pack.payments', 'Off')
   const result = deriveImplementationRoadmap(config, [])
   assert.ok(phaseIds(result).includes('domain-booking'))
@@ -79,6 +90,7 @@ check('explicit Payments Off removes payment integration proof without removing 
 
 check('single-location inventory roadmap does not invent an inter-location transfer phase', () => {
   let config = createProjectConfig('Inventory / POS')
+  config = setScopeChoice(config, 'pack.inventory', 'On')
   config = setConfigValue(config, 'inventory.locations', 'Single location')
   const result = deriveImplementationRoadmap(config, [])
   const inventory = phaseById(result, 'domain-inventory')
@@ -87,7 +99,8 @@ check('single-location inventory roadmap does not invent an inter-location trans
 })
 
 check('an authored complete Core Flow becomes a journey phase with ordered user-authored steps', () => {
-  const config = createProjectConfig('Booking / Scheduling')
+  let config = createProjectConfig('Booking / Scheduling')
+  config = setScopeChoice(config, 'pack.booking', 'On')
   const template = suggestedCoreFlowTemplates(config).find((item) => item.templateId === 'booking-customer')
   assert.ok(template)
   const flow = coreFlowFromTemplate(template)
@@ -119,8 +132,11 @@ check('a flow never mutates or activates App Setup scope while deriving roadmap'
   assert.equal(JSON.stringify(config), before)
 })
 
-check('mission-critical admin products derive access, operations, hardening, and release dependencies', () => {
-  const result = deriveImplementationRoadmap(createProjectConfig('Government System'), [])
+check('explicit mission-critical admin scope derives access, operations, hardening, and release dependencies', () => {
+  let config = createProjectConfig('Government System')
+  config = setScopeChoice(config, 'admin.enabled', 'On')
+  config = setScopeChoice(config, 'pack.government', 'On')
+  const result = deriveImplementationRoadmap(config, [])
   const ids = phaseIds(result)
   assert.ok(ids.includes('access'))
   assert.ok(ids.includes('operations'))
@@ -140,7 +156,8 @@ check('unsafe blocker-level configuration creates a blocking preflight phase', (
 })
 
 check('roadmap phase dependencies reference only real earlier phases', () => {
-  const config = createProjectConfig('Clinic / EMR')
+  let config = createProjectConfig('Clinic / EMR')
+  config = setScopeChoice(config, 'pack.clinic', 'On')
   const template = suggestedCoreFlowTemplates(config).find((item) => item.templateId === 'clinic-encounter')
   const flowsForScenario = template ? [coreFlowFromTemplate(template)] : []
   const result = deriveImplementationRoadmap(config, flowsForScenario)
@@ -152,7 +169,9 @@ check('roadmap phase dependencies reference only real earlier phases', () => {
 })
 
 check('roadmap Markdown exposes dependencies, deliverables, proof, and derivation evidence', () => {
-  const result = deriveImplementationRoadmap(createProjectConfig('E-commerce'), [])
+  let config = createProjectConfig('E-commerce')
+  config = setScopeChoice(config, 'pack.commerce', 'On')
+  const result = deriveImplementationRoadmap(config, [])
   const output = implementationRoadmapMarkdown(result)
   assert.match(output, /Phase 1 — Foundation & architecture/)
   assert.match(output, /- Deliverables:/)
@@ -161,7 +180,9 @@ check('roadmap Markdown exposes dependencies, deliverables, proof, and derivatio
 })
 
 check('roadmap AI prompt is explicit sequencing guidance and contains proof-before-advancing gates', () => {
-  const result = deriveImplementationRoadmap(createProjectConfig('Tournament / Event'), [])
+  let config = createProjectConfig('Tournament / Event')
+  config = setScopeChoice(config, 'pack.tournament', 'On')
+  const result = deriveImplementationRoadmap(config, [])
   const output = implementationRoadmapPrompt(result)
   assert.match(output, /PHASE 1 — Foundation & architecture/)
   assert.match(output, /Proof before advancing:/)

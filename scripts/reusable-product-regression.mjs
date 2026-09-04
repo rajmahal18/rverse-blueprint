@@ -178,6 +178,7 @@ check('runtime plugin loading is treated as an explicit architecture review boun
 
 check('reusable architecture derives one productization phase before domain implementation', () => {
   let config = createProjectConfig('Government System')
+  config = setScopeChoice(config, 'pack.government', 'On')
   config = setConfigValue(config, 'product.reuseIntent', 'Multi-organization platform')
   config = setConfigValue(config, 'org.mode', 'Multi-tenant organizations')
   const result = deriveImplementationRoadmap(config, [])

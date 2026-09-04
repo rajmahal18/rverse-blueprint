@@ -44,6 +44,7 @@ import {
 } from 'lucide-react'
 import PatternPreview from './components/PatternPreview'
 import VisualStudio from './components/VisualStudio'
+import PreviewStudio from './components/PreviewStudio'
 import { inspiration, patterns, type Pattern, type PatternCategory, type PatternLevel } from './data/catalog'
 import { colorLuminance, contrastRatio, defaultDna, fontFamilyFor, normalizeDna, resolvedDarkPalette, visualDnaContract, type Dna } from './data/visualDna'
 import { capabilities, capabilityCategories, type Capability, type CapabilityCategory, type CapabilityLevel } from './data/capabilities'
@@ -78,6 +79,7 @@ import {
   settingVisibleAtDepth,
   settingIncludedInContract,
   settingIsActive,
+  scopeIntegrityDiagnostics,
   type AppType,
   type ConfigProfile,
   type ConfigDepth,
@@ -90,6 +92,7 @@ import {
   appTypeMatches,
   configQuickFixes,
   configReadiness,
+  contextGapDecisions,
   domainSuggestions,
   edgeCases,
   projectContextReviewSignals,
@@ -98,6 +101,12 @@ import {
   type ConfigAction,
 } from './data/intelligence'
 import { configReviewSignals, type ReviewSignal } from './data/reviewSignals'
+import { compileScopeContract, fullBlueprintReferencePrompt, implementationConfigContractPrompt, scopeContractPrompt, scopeStateSummary } from './data/promptCompiler'
+import { visualContradictionSignals } from './data/visualReview'
+import { synthesizeVisualDirector, visualDirectorPrompt, type VisualDirectorOutput } from './data/visualDirector'
+import { patternExplorerIntelligence, patternIntelligencePrompt, type DirectionRecommendation, type PatternExplorerIntelligence } from './data/patternIntelligence'
+import { pageCompositionIntelligence, pageCompositionPrompt, type PageCompositionIntelligence } from './data/pageComposition'
+import { approvedVisualContractPrompt, createApprovedVisualContract, evaluateVisualApproval, normalizeApprovedVisualContract, staleVisualApprovalPrompt, type ApprovedVisualContract, type VisualApprovalInput } from './data/visualApproval'
 import {
   cleanupOrphanAssets,
   collectReferencedAssetIds,
@@ -109,7 +118,7 @@ import {
   stripInlineImageData,
 } from './data/persistence'
 
-type View = 'home' | 'setup' | 'flows' | 'roadmap' | 'patterns' | 'compare' | 'capabilities' | 'docs' | 'dna' | 'references' | 'inspiration' | 'spec'
+type View = 'home' | 'setup' | 'flows' | 'roadmap' | 'patterns' | 'compare' | 'capabilities' | 'docs' | 'dna' | 'preview' | 'references' | 'inspiration' | 'spec'
 
 type ReferenceFocus = 'Navigation' | 'Layout' | 'Typography' | 'Color' | 'Motion' | 'Components' | 'Composition' | 'Other'
 
@@ -136,6 +145,7 @@ type Snapshot = {
   references?: ReferenceItem[]
   context?: ProjectContext
   coreFlows?: CoreFlow[]
+  approvedVisualContract?: ApprovedVisualContract
 }
 
 type ConfigPreset = {
@@ -163,6 +173,7 @@ type Project = {
   config: ProjectConfig
   context: ProjectContext
   coreFlows: CoreFlow[]
+  approvedVisualContract?: ApprovedVisualContract
 }
 
 type CustomPattern = Pattern & { custom: true; sourceUrl?: string }
@@ -184,8 +195,8 @@ type BackupAsset = {
 }
 
 type BackupBundle = {
-  version: 12
-  blueprintVersion: '0.24.0'
+  version: 14
+  blueprintVersion: '0.31.0'
   exportedAt: string
   activeProjectId: string
   projects: Project[]
@@ -254,6 +265,7 @@ const blankProject = (name = 'Untitled app'): Project => ({
   config: createProjectConfig(),
   context: structuredClone(emptyProjectContext),
   coreFlows: [],
+  approvedVisualContract: undefined,
 })
 
 const normalizeReference = (reference: ReferenceItem): ReferenceItem => ({
@@ -282,12 +294,14 @@ const normalizeProject = (project: Project): Project => ({
     references: (snapshot.references ?? []).map(normalizeReference),
     context: normalizeProjectContext(snapshot.context),
     coreFlows: normalizeCoreFlows(snapshot.coreFlows),
+    approvedVisualContract: normalizeApprovedVisualContract(snapshot.approvedVisualContract),
   })),
   capabilities: Array.isArray(project.capabilities) ? project.capabilities : [],
   docs: Array.isArray(project.docs) ? project.docs : [...defaultDocIds],
   config: normalizeProjectConfig(project.config),
   context: normalizeProjectContext(project.context),
   coreFlows: normalizeCoreFlows(project.coreFlows),
+  approvedVisualContract: normalizeApprovedVisualContract(project.approvedVisualContract),
 })
 
 const normalizeWorkspace = (workspace: Partial<WorkspaceData> | null | undefined): WorkspaceData => {
@@ -628,43 +642,56 @@ function designSanity(input: Dna) {
   return notes.length ? notes : ['No obvious Visual Studio tension. Validate the direction on a representative mobile and desktop screen before standardizing it.']
 }
 
-function visualReviewSignals(dna: Dna) {
-  return designSanity(dna).filter((note) => !note.startsWith('No obvious Visual Studio tension.'))
+function visualReviewSignals(dna: Dna, selectedPatterns: Pattern[] = [], context?: ProjectContext) {
+  const sanity = designSanity(dna).filter((note) => !note.startsWith('No obvious Visual Studio tension.'))
+  const contradictions = visualContradictionSignals(dna, selectedPatterns, context).map((signal) => `VISUAL CONTRADICTION — ${signal.detail}`)
+  return Array.from(new Set([...sanity, ...contradictions]))
 }
 
-function buildConfigLines(config: ProjectConfig) {
-  return configSections.map((section) => {
-    const settings = configSettings.filter((setting) => setting.section === section.id && settingIncludedInContract(setting, config))
-    return {
-      section,
-      settings: settings.map((setting) => ({
-        setting,
-        value: effectiveConfigValue(config, setting.id),
-        overridden: config.overrides.includes(setting.id),
-        scope: isScopeSetting(setting.id) ? resolveScope(config, setting.id) : null,
-      })),
-    }
-  }).filter((group) => group.settings.length > 0)
+function projectVisualDirector(project: Project, config = normalizeProjectConfig(project.config)): VisualDirectorOutput {
+  return synthesizeVisualDirector({
+    appType: config.appType,
+    activePacks: configSettings.filter((setting) => setting.section === 'business' && resolveScope(config, setting.id).active).map((setting) => setting.label),
+    projectContext: projectContextEntries(project.context).map((entry) => entry.value).join(' '),
+    dna: project.dna,
+    media: {
+      generatePlaceholders: Boolean(effectiveConfigValue(config, 'media.generatePlaceholders')),
+      placeholderStyle: String(effectiveConfigValue(config, 'media.placeholderStyle')),
+      placeholderCoverage: String(effectiveConfigValue(config, 'media.placeholderCoverage')),
+    },
+  })
 }
 
-function contractValue(setting: (typeof configSettings)[number], config: ProjectConfig) {
-  if (!isScopeSetting(setting.id)) return formatConfigValue(effectiveConfigValue(config, setting.id))
-  const resolution = resolveScope(config, setting.id)
-  if (!resolution.active) return 'Off'
-  if (setting.kind === 'boolean') return resolution.source === 'Explicit' ? 'On' : `On — ${resolution.source.toLowerCase()}`
-  return `${formatConfigValue(resolution.effectiveValue)}${resolution.choice === 'Auto' ? ` — ${resolution.source.toLowerCase()}` : ''}`
+function projectPageComposition(project: Project, patternIntel: PatternExplorerIntelligence, selectedPatterns: Pattern[] = [], config = normalizeProjectConfig(project.config)): PageCompositionIntelligence {
+  const resolvedPatterns = activePatterns(selectedPatterns, config)
+  const director = projectVisualDirector(project, config)
+  return pageCompositionIntelligence({
+    config,
+    dna: project.dna,
+    director,
+    patternIntelligence: patternIntel,
+    projectContext: projectContextEntries(project.context).map((entry) => entry.value).join(' '),
+    selectedPatternIds: resolvedPatterns.map((pattern) => pattern.id),
+    visualContradictionCount: visualContradictionSignals(project.dna, resolvedPatterns, project.context).length,
+  })
 }
 
-function buildConfigMarkdown(config: ProjectConfig) {
-  return buildConfigLines(config).map(({ section, settings }) => `### ${section.label}\n${settings.map(({ setting, overridden, scope }) => `- ${setting.label}: ${contractValue(setting, config)}${overridden ? ' (customized)' : ''}${scope?.reason ? ` — ${scope.reason}` : ''}`).join('\n')}`).join('\n\n')
-}
-
-function buildConfigPrompt(config: ProjectConfig) {
-  return buildConfigLines(config).map(({ section, settings }) => `${section.label.toUpperCase()}\n${settings.map(({ setting, scope }) => `- ${setting.label}: ${contractValue(setting, config)}.${scope?.reason ? ` ${scope.reason}` : ''}`).join('\n')}`).join('\n\n')
+function projectApprovalInput(project: Project, patternIntel: PatternExplorerIntelligence, selectedPatterns: Pattern[] = [], config = normalizeProjectConfig(project.config), director = projectVisualDirector(project, config), pageIntel = projectPageComposition(project, patternIntel, selectedPatterns, config)): VisualApprovalInput {
+  const resolvedPatterns = activePatterns(selectedPatterns, config)
+  return {
+    dna: project.dna,
+    config,
+    projectContext: projectContextEntries(project.context).map((entry) => entry.value).join(' '),
+    selectedPatternIds: resolvedPatterns.map((pattern) => pattern.id),
+    director,
+    patternIntel,
+    pageIntel,
+  }
 }
 
 function buildConfigHighlights(config: ProjectConfig) {
   const packSettings = configSettings.filter((setting) => setting.section === 'business' && resolveScope(config, setting.id).active)
+  const suggestedPackSettings = configSettings.filter((setting) => setting.section === 'business' && resolveScope(config, setting.id).state === 'suggested')
   const overrideSettings = config.overrides.map((id) => configSettings.find((setting) => setting.id === id)).filter((setting): setting is (typeof configSettings)[number] => Boolean(setting) && settingIncludedInContract(setting!, config))
   const explicitScope = Object.entries(config.scopeChoices).map(([id, choice]) => {
     const setting = configSettings.find((item) => item.id === id)
@@ -675,7 +702,8 @@ function buildConfigHighlights(config: ProjectConfig) {
     `- Setup profile: ${config.profile}`,
     `- Operational scale: ${resolvedOperationalScale(config)}${config.operationalScale === 'Auto' ? ' (Auto-inferred)' : ' (explicit)'}`,
     `- Product reuse: ${String(effectiveConfigValue(config, 'product.reuseIntent'))}${effectiveConfigValue(config, 'product.reuseIntent') !== 'Single-purpose application' ? ` · ${String(effectiveConfigValue(config, 'product.deploymentModel'))} · ${String(effectiveConfigValue(config, 'product.moduleModel'))}` : ''}`,
-    `- Active business packs: ${packSettings.length ? packSettings.map((setting) => setting.label).join(', ') : 'None / general-purpose'}`,
+    `- Active business packs: ${packSettings.length ? packSettings.map((setting) => setting.label).join(', ') : 'None selected'}`,
+    `- Suggested business packs (not included): ${suggestedPackSettings.length ? suggestedPackSettings.map((setting) => setting.label).join(', ') : 'None'}`,
     `- Deliberate customizations: ${config.overrides.length + Object.keys(config.scopeChoices).length}`,
   ]
   if (explicitScope.length) lines.push(...explicitScope.slice(0, 10))
@@ -689,7 +717,23 @@ function formatReviewSignal(signal: ReviewSignal) {
   return `[${signal.severity.toUpperCase()} · ${signal.category.toUpperCase()}] ${signal.title} — ${signal.detail}`
 }
 
-function buildMarkdown(project: Project, selectedPatterns: Pattern[], selectedCapabilities: Capability[], similarity: ReturnType<typeof similarityReport>) {
+function compactVisualContract(dna: Dna, prompt = false) {
+  const heading = (label: string) => prompt ? label.toUpperCase() : `### ${label}`
+  const lines = [
+    `${heading('Direction')}\n- Personality: ${dna.personality}\n- Design autonomy: ${dna.designAutonomy}\n- Visual originality: ${dna.visualOriginality}\n- Signature strength: ${dna.signatureStrength}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}`,
+    `${heading('Theme & color')}\n- Theme: ${dna.themeMode}; default ${dna.defaultTheme}\n- Semantic palette: ink ${dna.palette.ink}, background ${dna.palette.background}, surface ${dna.palette.surface}, accent ${dna.palette.accent}, muted ${dna.palette.muted}, positive ${dna.palette.positive}\n- Accent usage: ${dna.accentUsage}; background treatment: ${dna.backgroundTreatment}`,
+    `${heading('Typography & layout')}\n- Type: ${dna.headingTypography} headings + ${dna.bodyTypography} body; ${dna.bodyFontSize}px body; heading scale ${dna.headingScale}%\n- Density: ${dna.density}/100; whitespace: ${dna.whitespacePriority}; content max-width: ${dna.contentMaxWidth}px\n- Grid/alignment: ${dna.gridCharacter}; ${dna.alignmentTendency}; responsive behavior: ${dna.responsiveBehavior}
+- Navigation variant: ${dna.navigationVariant}`,
+    `${heading('Surfaces & controls')}\n- Sections: ${dna.sectionStrategy}; surfaces: ${dna.surfaceLanguage}; shape: ${dna.shapeLanguage}\n- Radii: surfaces ${dna.surfaceRadius}px, controls ${dna.controlRadius}px, buttons ${dna.buttonRadius}px\n- Inputs: ${dna.inputAppearance}, ${dna.inputHeight}px; buttons: ${dna.buttonShape}, ${dna.buttonWeight}, ${dna.buttonEmphasis}`,
+    `${heading('Imagery, icons & motion')}\n- Imagery: ${dna.imageryMode}; ${dna.imageCharacter}; ${dna.imageTreatment}; ${dna.imagePresentation}\n- Icons: ${dna.iconStyle}; emphasis ${dna.iconWeight}/100; ${dna.iconSize}px; label unfamiliar icons: ${dna.labelUnfamiliarIcons ? 'Yes' : 'No'}\n- Motion: ${dna.motionAmount}; ${dna.motionCharacter}; ${dna.motionDuration}ms; reduced-motion fallback: ${dna.reducedMotionFallback ? 'Required' : 'Not selected'}`,
+    `${heading('Explicit exclusions')}\n- ${dna.visualAntiPatterns.length ? dna.visualAntiPatterns.join(', ') : 'None selected.'}`,
+  ]
+  const signature = dna.visualSignature.trim()
+  if (signature) lines.push(`${heading('Visual signature — verbatim')}\n${signature}`)
+  return lines.join('\n\n')
+}
+
+function buildMarkdown(project: Project, selectedPatterns: Pattern[], selectedCapabilities: Capability[], similarity: ReturnType<typeof similarityReport>, patternIntel: PatternExplorerIntelligence) {
   const dna = project.dna
   const config = normalizeProjectConfig(project.config)
   const readiness = configReadiness(config)
@@ -698,16 +742,104 @@ function buildMarkdown(project: Project, selectedPatterns: Pattern[], selectedCa
   const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
   const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
-  const visualSignals = visualReviewSignals(dna)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
   const resolvedPatterns = activePatterns(selectedPatterns, config)
+  const contextDecisions = contextGapDecisions(project.context, config)
+  const visualSignals = visualReviewSignals(dna, resolvedPatterns, project.context)
+  const director = projectVisualDirector(project, config)
+  const pageIntel = projectPageComposition(project, patternIntel, selectedPatterns, config)
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
   const references = project.references.length
     ? project.references.map((ref) => `- ${ref.title}${ref.url ? ` — ${ref.url}` : ''}\n  - Use only for: ${ref.focus.join(', ') || 'general direction'}\n  - Note: ${ref.note || 'No note supplied.'}`).join('\n')
     : '- No external references saved.'
   const docs = projectDocs.filter((doc) => project.docs.includes(doc.id))
+  const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const currentVisualGuidance = `## Current visual guidance — ${approval.status === 'stale' ? 'provisional until re-approval' : 'not yet approved'}
+### Visual Director
+${visualDirectorPrompt(director)}
 
-  return `# ${project.name}\n\n## Blueprint summary\n${buildConfigHighlights(config)}\n- Readiness: ${readiness.label} (${readiness.score}% coherence indicator)\n- Decision coverage: ${readiness.coverage}%\n- App Setup severity: ${readiness.blockers} blocker · ${readiness.important} important · ${readiness.review} review · ${readiness.advisory} advisory\n${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length ? `- Review signals: ${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length} (${reviewSignals.length} App Setup typed, ${contextSignals.length} Project Context advisory, ${visualSignals.length} visual, ${layerSignals.length} cross-layer)` : '- Review signals: None'}\n\n## User-provided project context — optional / verbatim\n${projectContextPrompt(project.context)}\n\nThis context is interpretive guidance only. It must not create, remove, or override structured Blueprint scope.\n\n## Core flows — user-authored workflow truth\n${coreFlowsMarkdown(project.coreFlows, 3)}\n\nCore flows describe intended actor journeys only inside the resolved App Setup scope. They must not activate a capability that App Setup explicitly or contextually excludes.\n\n## Derived implementation roadmap\n${implementationRoadmapMarkdown(roadmap, 3)}\n\nThe roadmap is sequencing guidance derived from App Setup + Core Flows. It never creates scope, and a roadmap item must be narrowed or dropped when its underlying App Setup scope is inactive.\n\n## Acceptance criteria\n${criteria.map((item) => `- ${item}`).join('\n')}\n\n## Edge cases to prove\n${cases.map((item) => `- ${item}`).join('\n')}\n\n${reviewSignals.length ? `## App Setup review signals — typed by severity\n${reviewSignals.map((signal) => `- ${formatReviewSignal(signal)}`).join('\n')}\n\n` : ''}${contextSignals.length ? `## Project Context review signals — advisory only\nThese signals do not change structured scope. Review them only if they reveal that App Setup does not match the user's stated intent.\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\n\n` : ''}${visualSignals.length ? `## Visual review signals\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Product direction\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n\n## Product capabilities\n${resolvedCapabilities.length ? resolvedCapabilities.map((cap) => `### ${cap.name}\n${cap.prompt}\nBest fit: ${cap.bestFor}\nWatchout: ${cap.watchout}`).join('\n\n') : 'No active compatible product capabilities selected yet.'}\n\n## Visual Studio — structured visual contract\n- Personality: ${dna.personality}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n\n${visualDnaContract(dna)}\n\n## Selected visual patterns\n${resolvedPatterns.length ? resolvedPatterns.map((pattern) => `### ${pattern.name}\n${pattern.prompt}\nBest fit: ${pattern.bestFor}\nWatchout: ${pattern.watchout}`).join('\n\n') : 'No active compatible visual patterns selected yet.'}\n\n${layerSignals.length ? `## Cross-layer review\nThese saved selections are preserved but intentionally excluded from implementation direction until App Setup makes them compatible:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Directional references\n${references}\n\n## MVP documentation to generate\n${docs.length ? docs.map((doc) => `- ${doc.filename} — ${doc.summary}`).join('\n') : '- No project documentation files selected.'}\n\n## Variety check\n${similarity.score === null ? 'No prior project is available for comparison yet.' : `Closest saved project: ${similarity.project?.name} (${similarity.score}% similarity). Status: ${similarity.label}.`}\n\n## Full active app-setup contract\nThis appendix is intentionally exhaustive for implementation agents. The summary above is the human review surface.\n\n${buildConfigMarkdown(config)}\n\n## Implementation principle\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required/inferred structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices constrain how already-selected product scope is packaged, isolated, configured, and upgraded across organizations; they never activate a business capability by themselves. The Derived Implementation Roadmap is sequencing guidance only and cannot create or override scope. Preserve usability, responsiveness, accessibility, data integrity, and the app's actual workflow. References are directional; do not copy external designs verbatim. Avoid generic SaaS styling, arbitrary visual effects, repetitive admin work that can reasonably be automated, and repeating the same visual language across unrelated projects.\n`
+### Pattern Explorer 2.0 + anti-homogeneity
+${patternIntelligencePrompt(patternIntel)}
+
+### Page Composition Intelligence + visual quality review
+${pageCompositionPrompt(pageIntel)}
+
+### Visual Studio — structured current state
+- Personality: ${dna.personality}
+- Ease-of-use priority: ${dna.easePriority}
+- Creative stretch: ${dna.stretch}
+
+${compactVisualContract(dna)}
+
+### Selected visual patterns
+${resolvedPatterns.length ? resolvedPatterns.map((pattern) => `#### ${pattern.name}
+${pattern.prompt}
+Best fit: ${pattern.bestFor}
+Watchout: ${pattern.watchout}`).join('\n\n') : 'No active compatible visual patterns selected yet.'}`
+  const visualAuthoritySection = approval.status === 'approved' && approval.contract
+    ? `## Approved Visual Contract — authoritative visual source
+${approvedVisualContractPrompt(approval.contract)}
+Implementation must follow this approved contract as the primary visual authority. Raw Visual Studio settings remain available only in BLUEPRINT_REFERENCE.md for audit/debugging.`
+    : approval.status === 'stale'
+      ? `## Visual approval — stale / re-approval required
+${staleVisualApprovalPrompt(approval)}
+
+${currentVisualGuidance}`
+      : `## Visual approval — not yet approved
+No approved Visual Contract exists yet. The current synthesis below remains editable guidance until the user explicitly approves it in Preview Studio.
+
+${currentVisualGuidance}`
+
+  return `# ${project.name}\n\n## Blueprint summary\n${buildConfigHighlights(config)}\n- Readiness: ${readiness.label} (${readiness.score}% coherence indicator)\n- Decision coverage: ${readiness.coverage}%\n- App Setup severity: ${readiness.blockers} blocker · ${readiness.important} important · ${readiness.review} review · ${readiness.advisory} advisory\n${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length ? `- Review signals: ${reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length} (${reviewSignals.length} App Setup typed, ${contextSignals.length} Project Context advisory, ${visualSignals.length} visual, ${layerSignals.length} cross-layer)` : '- Review signals: None'}\n\n## User-provided project context — optional / verbatim\n${projectContextPrompt(project.context)}\n\nThis context is interpretive guidance only. It must not create, remove, or override structured Blueprint scope.\n\n## Core flows — user-authored workflow truth\n${coreFlowsMarkdown(project.coreFlows, 3)}\n\nCore flows describe intended actor journeys only inside active App Setup scope. They must not activate a capability that is Suggested, Off, or otherwise inactive.\n\n## Derived implementation roadmap\n${implementationRoadmapMarkdown(roadmap, 3)}\n\nThe roadmap is sequencing guidance derived from App Setup + Core Flows. It never creates scope, and a roadmap item must be narrowed or dropped when its underlying App Setup scope is inactive.\n\n## Acceptance criteria\n${criteria.map((item) => `- ${item}`).join('\n')}\n\n## Edge cases to prove\n${cases.map((item) => `- ${item}`).join('\n')}\n\n${reviewSignals.length ? `## App Setup review signals — typed by severity\n${reviewSignals.map((signal) => `- ${formatReviewSignal(signal)}`).join('\n')}\n\n` : ''}${contextSignals.length ? `## Project Context review signals — advisory only\nThese signals do not change structured scope. Review them only if they reveal that App Setup does not match the user's stated intent.\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\n\n` : ''}${visualSignals.length ? `## Visual review signals\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}${contextDecisions.length ? `## Context-aware gap filling — presentation/detail only\nMode: ${String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}. Provenance: context_completion. These decisions never authorize optional functional scope.\n${contextDecisions.map((decision) => `- [${decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · ${decision.confidence}] ${decision.decision}\n  Reason: ${decision.reason}\n  Source: ${decision.source}`).join('\n')}\n\n` : ''}## Product direction\n- Mobile-first: ${dna.mobileFirst ? 'Yes' : 'No'}\n- Ease-of-use priority: ${dna.easePriority}\n- Creative stretch: ${dna.stretch}\n- Design autonomy: ${dna.designAutonomy}\n- Visual originality: ${dna.visualOriginality}\n\n${visualAuthoritySection}\n\n${layerSignals.length ? `## Cross-layer review\nThese saved selections are preserved but intentionally excluded from implementation direction until App Setup makes them compatible:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}## Directional references\n${references}\n\n## MVP documentation to generate\n${docs.length ? docs.map((doc) => `- ${doc.filename} — ${doc.summary}`).join('\n') : '- No project documentation files selected.'}\n\n## Visual differentiation check\n${patternIntel.antiHomogeneity.summary}\n${patternIntel.antiHomogeneity.repeatedTraits.length ? `Repeated traits: ${patternIntel.antiHomogeneity.repeatedTraits.join('; ')}.` : 'No dominant repeated traits detected yet.'}\n\n## Compiled implementation contract\nThis is the execution-oriented contract. Full resolved detail is exported separately in BLUEPRINT_REFERENCE.md.\n\n${implementationConfigContractPrompt(config)}\n\n## Implementation principle\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices constrain how already-selected product scope is packaged, isolated, configured, and upgraded across organizations; they never activate a business capability by themselves. The Derived Implementation Roadmap is sequencing guidance only and cannot create or override scope. Preserve usability, responsiveness, accessibility, data integrity, and the app's actual workflow. References are directional; do not copy external designs verbatim. Avoid generic SaaS styling, arbitrary visual effects, repetitive admin work that can reasonably be automated, and repeating the same visual language across unrelated projects.\n`
+}
+
+function buildBlueprintReference(project: Project, selectedPatterns: Pattern[], patternIntel: PatternExplorerIntelligence) {
+  const config = normalizeProjectConfig(project.config)
+  const contextDecisions = contextGapDecisions(project.context, config)
+  const director = projectVisualDirector(project, config)
+  const pageIntel = projectPageComposition(project, patternIntel, selectedPatterns, config)
+  const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const savedApproval = project.approvedVisualContract
+    ? `## Saved Approved Visual Contract — audit snapshot
+Status against current Blueprint: ${approval.status.toUpperCase()}
+${approval.status === 'stale' ? `Changed material areas: ${approval.changedAreas.join(', ')}\nThe snapshot below is preserved for audit/history only and is not current compiler authority until re-approved.\n` : ''}
+${approvedVisualContractPrompt(project.approvedVisualContract)}`
+    : `## Saved Approved Visual Contract — audit snapshot
+No approved Visual Contract exists yet.`
+  return `# BLUEPRINT_REFERENCE — ${project.name}
+
+This is the exhaustive resolved Blueprint reference. It is intentionally separate from the primary implementation prompt. Suggested scope is advisory and MUST NOT be implemented unless selected. A fresh Approved Visual Contract is the primary visual implementation authority; stale approval is audit history only.
+
+## Visual approval state
+- Status: ${approval.label}
+- Detail: ${approval.detail}
+${approval.changedAreas.length ? `- Changed material areas: ${approval.changedAreas.join(', ')}\n` : ''}
+${savedApproval}
+
+## Scope authority
+${scopeContractPrompt(config)}
+
+## Full resolved App Setup
+${fullBlueprintReferencePrompt(config)}
+
+## Current Visual Director synthesis — editable/current state
+${visualDirectorPrompt(director)}
+
+## Current Pattern Explorer 2.0 + anti-homogeneity
+${patternIntelligencePrompt(patternIntel)}
+
+## Current Page Composition Intelligence + visual quality review
+${pageCompositionPrompt(pageIntel)}
+
+## Full current Visual Studio contract
+${visualDnaContract(project.dna)}
+
+## Project Context — advisory / verbatim
+${projectContextPrompt(project.context)}
+
+## Context completion provenance
+${contextDecisions.length ? contextDecisions.map((decision) => `- ${decision.source} · ${decision.status} · ${decision.confidence}: ${decision.decision} — ${decision.reason}`).join('\n') : '- No context-completion decisions.'}
+`
 }
 
 function buildDocsManifest(project: Project, selectedCapabilities: Capability[]) {
@@ -719,7 +851,7 @@ function buildDocsManifest(project: Project, selectedCapabilities: Capability[])
   return `# Documentation Manifest — ${project.name}\n\nGenerate and maintain these files as part of the MVP. Keep each document concise, repository-specific, and updated when implementation materially changes.\n\nSelected capabilities: ${capabilityNames}\nCore flows captured: ${project.coreFlows.length}\nDerived implementation phases: ${roadmap.phases.length}\n\n${docs.map((doc) => `## ${doc.filename}\nPurpose: ${doc.summary}\nWhy it exists: ${doc.why}\nSuggested sections:\n${doc.sections.map((section) => `- ${section}`).join('\n')}`).join('\n\n')}\n\n## Documentation rule\nDo not create filler documentation. Every selected file must contain project-specific decisions, commands, constraints, and current truth. Cross-link related docs instead of duplicating large sections.\n`
 }
 
-function buildAgentPrompt(project: Project, selectedPatterns: Pattern[], selectedCapabilities: Capability[]) {
+function buildAgentPrompt(project: Project, selectedPatterns: Pattern[], selectedCapabilities: Capability[], patternIntel: PatternExplorerIntelligence) {
   const dna = project.dna
   const config = normalizeProjectConfig(project.config)
   const docs = projectDocs.filter((doc) => project.docs.includes(doc.id))
@@ -728,13 +860,109 @@ function buildAgentPrompt(project: Project, selectedPatterns: Pattern[], selecte
   const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
   const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
-  const visualSignals = visualReviewSignals(dna)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
   const resolvedPatterns = activePatterns(selectedPatterns, config)
+  const contextDecisions = contextGapDecisions(project.context, config)
+  const visualSignals = visualReviewSignals(dna, resolvedPatterns, project.context)
+  const director = projectVisualDirector(project, config)
+  const pageIntel = projectPageComposition(project, patternIntel, selectedPatterns, config)
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
-  return `Build or improve “${project.name}” according to this Blueprint. Preserve working behavior unless a change is explicitly required.\n\nBLUEPRINT SUMMARY\n${buildConfigHighlights(config)}\n- Usability is non-negotiable: common paths must be obvious, advanced/irrelevant controls progressively disclosed, user work preserved, and recovery from errors clear.\n${reviewSignals.length ? `- Resolve these typed App Setup review signals deliberately before calling the implementation complete:\n${reviewSignals.map((signal) => `  - ${formatReviewSignal(signal)}`).join('\n')}` : '- The current Blueprint has no App Setup review signals.'}\n${contextSignals.length ? `- Project Context advisory review: ${contextSignals.length} possible scope mismatch${contextSignals.length > 1 ? 'es' : ''}. These are suggestions only and MUST NOT change scope automatically.` : '- Project Context advisory review: No obvious structured-scope mismatch detected.'}
-${visualSignals.length ? `- Visual review: ${visualSignals.length} deterministic color/design sanity signal${visualSignals.length > 1 ? 's' : ''} should be resolved or deliberately accepted.` : '- Visual review: No obvious deterministic visual tension.'}\n${layerSignals.length ? `- Cross-layer review: ${layerSignals.length} saved selection${layerSignals.length > 1 ? 's are' : ' is'} excluded from implementation direction until App Setup becomes compatible.` : '- Cross-layer review: No saved selection conflicts.'}\n\nCORE FLOWS — USER-AUTHORED WORKFLOW CONTRACT\n${coreFlowsPrompt(project.coreFlows)}\nTreat these flows as explicit workflow intent only within resolved App Setup scope. Never enable a capability solely because a flow mentions it; if a flow conflicts with App Setup, preserve App Setup scope and surface the conflict for human review rather than inventing scope.\n\nDERIVED IMPLEMENTATION ROADMAP — SEQUENCING, NOT SCOPE\n${implementationRoadmapPrompt(roadmap)}\nFollow this as a recommended dependency/order plan. It is fully derived from the structured Blueprint and Core Flows; it cannot authorize a feature that resolved App Setup excludes. Parallelize phases only when their shared contracts are stable.\n\nUSER-PROVIDED PROJECT CONTEXT — OPTIONAL / VERBATIM\n${projectContextPrompt(project.context)}\nInterpret these answers as human intent and priorities only. Do not translate them into new product scope, do not silently change structured choices, and do not let them override explicit or resolved App Setup.
-${contextSignals.length ? `\nPROJECT CONTEXT REVIEW SIGNALS — ADVISORY ONLY\n${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}\nTreat these as prompts for human review, never as authorization to add features.` : ''}\n\nACCEPTANCE CRITERIA\n${criteria.map((item) => `- ${item}`).join('\n')}\n\nEDGE CASES TO TEST\n${cases.map((item) => `- ${item}`).join('\n')}\n\nFULL APP SETUP CONTRACT\n${buildConfigPrompt(config)}\n\nPRODUCT CAPABILITIES\n${resolvedCapabilities.length ? resolvedCapabilities.map((c) => `- ${c.name}: ${c.prompt}`).join('\n') : '- No active compatible capabilities selected; do not invent major product scope.'}\n\nVISUAL STUDIO — STRUCTURED VISUAL CONTRACT\n- Personality: ${dna.personality}\n- Ease of use: ${dna.easePriority}. Creative stretch: ${dna.stretch}.\n${visualDnaContract(dna, true)}\n\n${visualSignals.length ? `VISUAL REVIEW SIGNALS\n${visualSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}VISUAL PATTERNS TO INTERPRET, NOT COPY AS A TEMPLATE\n${resolvedPatterns.length ? resolvedPatterns.map((p) => `- ${p.name}: ${p.prompt}`).join('\n') : '- No active compatible visual patterns selected; derive a coherent system from the structured Visual Studio contract.'}\n\n${layerSignals.length ? `CROSS-LAYER REVIEW — SAVED BUT EXCLUDED\nThe following saved capability/pattern choices conflict with resolved App Setup. Do not implement them unless the structured setting is changed:\n${layerSignals.map((signal) => `- ${signal}`).join('\n')}\n\n` : ''}REFERENCES\n${project.references.length ? project.references.map((ref) => `- ${ref.title}: use only for ${ref.focus.join(', ') || 'the noted direction'}. ${ref.note}`).join('\n') : '- None supplied.'}\n\nMVP PROJECT DOCS\nGenerate and maintain these repository files as part of the implementation:\n${docs.length ? docs.map((doc) => `- ${doc.filename}: ${doc.summary}`).join('\n') : '- No additional Markdown files selected.'}\n\nGUARDRAILS\nInstruction authority, highest to lowest: (1) explicit App Setup scope, (2) required/inferred structured dependencies and hard Blueprint constraints, (3) user-authored Core Flows for workflow behavior inside that resolved scope, (4) user-provided Project Context as interpretive guidance only, (5) recommended behavior/quality defaults inside active scope, then (6) implementation judgment where Blueprint is silent. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices define packaging, tenant isolation, module/configuration boundaries, and upgrade strategy for already-selected scope; never treat them as permission to invent business modules. Treat the Derived Implementation Roadmap as sequencing guidance only; it never adds scope. Keep capabilities modular and authorization/server validation explicit. Minimize repetitive manual operations when safe automation is reasonable. Keep the interface internally consistent but visually distinct from unrelated past projects. Do not add generic SaaS decoration, arbitrary gradients/glows, excessive cards, or motion that delays tasks. Use strong hierarchy, deliberate spacing, accessible contrast, large touch targets where applicable, and reduced-motion fallbacks for meaningful animation. Before completion, run the project’s validation/build/test commands, prove the acceptance criteria and relevant edge cases, resolve review signals, and update the selected documentation to match the final implementation.`
+  const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const currentVisualGuidance = `VISUAL DIRECTOR — CURRENT SYNTHESIS${approval.status === 'stale' ? ' / PROVISIONAL UNTIL RE-APPROVAL' : ''}
+${visualDirectorPrompt(director)}
+This synthesis has visual/presentational authority only. It cannot activate functional scope.
+
+${patternIntelligencePrompt(patternIntel)}
+
+${pageCompositionPrompt(pageIntel)}
+
+VISUAL STUDIO — CURRENT STRUCTURED STATE
+- Personality: ${dna.personality}
+- Ease of use: ${dna.easePriority}. Creative stretch: ${dna.stretch}.
+${compactVisualContract(dna, true)}
+
+${visualSignals.length ? `VISUAL REVIEW SIGNALS
+${visualSignals.map((signal) => `- ${signal}`).join('\n')}
+
+` : ''}VISUAL PATTERNS — CURRENT COMPATIBLE SELECTIONS
+${resolvedPatterns.length ? resolvedPatterns.map((p) => `- ${p.name}: ${p.prompt}`).join('\n') : '- No active compatible visual patterns selected; derive a coherent system from current synthesized guidance.'}`
+  const visualAuthority = approval.status === 'approved' && approval.contract
+    ? `VISUAL AUTHORITY — APPROVED VISUAL CONTRACT
+The following approved snapshot is the primary and authoritative visual implementation source. Do not recombine raw settings into a competing direction.
+
+${approvedVisualContractPrompt(approval.contract)}
+
+Raw/current Visual Studio detail remains in BLUEPRINT_REFERENCE.md for audit/debugging only.`
+    : approval.status === 'stale'
+      ? `VISUAL AUTHORITY — RE-APPROVAL REQUIRED
+${staleVisualApprovalPrompt(approval)}
+
+${currentVisualGuidance}`
+      : `VISUAL AUTHORITY — NOT YET APPROVED
+No approved Visual Contract exists. Treat the following current synthesis as editable/provisional visual direction and require explicit approval before calling visual direction final.
+
+${currentVisualGuidance}`
+
+  return `Build or improve “${project.name}” according to this Blueprint. Preserve working behavior unless a change is explicitly required.
+
+BLUEPRINT SUMMARY
+${buildConfigHighlights(config)}
+- Visual approval: ${approval.label}.${approval.status === 'stale' ? ` Changed material areas: ${approval.changedAreas.join(', ')}.` : ''}
+- Usability is non-negotiable: common paths must be obvious, advanced/irrelevant controls progressively disclosed, user work preserved, and recovery from errors clear.
+${reviewSignals.length ? `- Resolve these typed App Setup review signals deliberately before calling the implementation complete:
+${reviewSignals.map((signal) => `  - ${formatReviewSignal(signal)}`).join('\n')}` : '- The current Blueprint has no App Setup review signals.'}
+${contextSignals.length ? `- Project Context advisory review: ${contextSignals.length} possible scope mismatch${contextSignals.length > 1 ? 'es' : ''}. These are suggestions only and MUST NOT change scope automatically.` : '- Project Context advisory review: No obvious structured-scope mismatch detected.'}
+${visualSignals.length ? `- Visual review: ${visualSignals.length} deterministic color/design sanity signal${visualSignals.length > 1 ? 's' : ''} should be resolved or deliberately accepted.` : '- Visual review: No obvious deterministic visual tension.'}
+${layerSignals.length ? `- Cross-layer review: ${layerSignals.length} saved selection${layerSignals.length > 1 ? 's are' : ' is'} excluded from implementation direction until App Setup becomes compatible.` : '- Cross-layer review: No saved selection conflicts.'}
+
+CORE FLOWS — USER-AUTHORED WORKFLOW CONTRACT
+${coreFlowsPrompt(project.coreFlows)}
+Treat these flows as explicit workflow intent only within resolved App Setup scope. Never enable a capability solely because a flow mentions it; if a flow conflicts with App Setup, preserve App Setup scope and surface the conflict for human review rather than inventing scope.
+
+DERIVED IMPLEMENTATION ROADMAP — SEQUENCING, NOT SCOPE
+${implementationRoadmapPrompt(roadmap)}
+Follow this as a recommended dependency/order plan. It is fully derived from the structured Blueprint and Core Flows; it cannot authorize a feature that resolved App Setup excludes. Parallelize phases only when their shared contracts are stable.
+
+USER-PROVIDED PROJECT CONTEXT — OPTIONAL / VERBATIM
+${projectContextPrompt(project.context)}
+Interpret these answers as human intent and priorities only. Do not translate them into new product scope, do not silently change structured choices, and do not let them override explicit or resolved App Setup.${contextSignals.length ? `
+
+PROJECT CONTEXT REVIEW SIGNALS — ADVISORY ONLY
+${contextSignals.map((signal) => `- ${signal.title}: ${signal.detail}`).join('\n')}
+Treat these as prompts for human review, never as authorization to add features.` : ''}${contextDecisions.length ? `
+
+CONTEXT-AWARE GAP FILLING — PRESENTATION/DETAIL ONLY
+Mode: ${String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}. Every item below has source=context_completion.
+${contextDecisions.map((decision) => `- ${decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · ${decision.confidence}: ${decision.decision} — ${decision.reason}`).join('\n')}
+Only AI-FILLED GAP items are presentational implementation guidance. HELD FOR SCOPE items remain advisory until explicit App Setup scope exists. Neither status can authorize checkout, accounts, payments, inventory, CRM, booking, admin dashboards, or any other major functional module.` : ''}
+
+ACCEPTANCE CRITERIA
+${criteria.map((item) => `- ${item}`).join('\n')}
+
+EDGE CASES TO TEST
+${cases.map((item) => `- ${item}`).join('\n')}
+
+COMPILED IMPLEMENTATION CONTRACT
+${implementationConfigContractPrompt(config)}
+
+${visualAuthority}
+
+PRODUCT CAPABILITIES
+${resolvedCapabilities.length ? resolvedCapabilities.map((c) => `- ${c.name}: ${c.prompt}`).join('\n') : '- No active compatible capabilities selected; do not invent major product scope.'}
+
+${layerSignals.length ? `CROSS-LAYER REVIEW — SAVED BUT EXCLUDED
+The following saved capability/pattern choices conflict with resolved App Setup. Do not implement them unless the structured setting is changed:
+${layerSignals.map((signal) => `- ${signal}`).join('\n')}
+
+` : ''}REFERENCES
+${project.references.length ? project.references.map((ref) => `- ${ref.title}: use only for ${ref.focus.join(', ') || 'the noted direction'}. ${ref.note}`).join('\n') : '- None supplied.'}
+
+MVP PROJECT DOCS
+Generate and maintain these repository files as part of the implementation:
+${docs.length ? docs.map((doc) => `- ${doc.filename}: ${doc.summary}`).join('\n') : '- No additional Markdown files selected.'}
+
+GUARDRAILS
+Instruction authority, highest to lowest: (1) explicit App Setup scope, (2) required structured dependencies and hard Blueprint constraints, (3) a fresh Approved Visual Contract for visual/presentational implementation only, (4) user-authored Core Flows for workflow behavior inside resolved functional scope, (5) user-provided Project Context as interpretive guidance only, (6) recommended behavior/quality defaults inside active scope, then (7) implementation judgment where Blueprint is silent. A Visual Contract never authorizes functional scope. If visual approval is stale, the previous contract is audit history only and MUST NOT be treated as current visual authority until re-approved. Never create a feature solely because a behavioral default, capability card, visual pattern, reference, page preview, or free-text context mentions it. Saved capabilities/patterns excluded by cross-layer resolution are not implementation requirements. Reusable-product architecture choices define packaging, tenant isolation, module/configuration boundaries, and upgrade strategy for already-selected scope; never treat them as permission to invent business modules. Treat the Derived Implementation Roadmap as sequencing guidance only; it never adds scope. Keep capabilities modular and authorization/server validation explicit. Minimize repetitive manual operations when safe automation is reasonable. Keep the interface internally consistent but visually distinct from unrelated past projects. Do not add generic SaaS decoration, arbitrary gradients/glows, excessive cards, or motion that delays tasks. Use strong hierarchy, deliberate spacing, accessible contrast, large touch targets where applicable, and reduced-motion fallbacks for meaningful animation. Before completion, run the project’s validation/build/test commands, prove the acceptance criteria and relevant edge cases, resolve review signals, and update the selected documentation to match the final implementation.`
 }
 
 export default function App() {
@@ -880,6 +1108,20 @@ export default function App() {
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, normalizedActiveConfig)
   const similarity = similarityReport(activeProject, projects)
   const recommendations = recommendPatterns(allPatterns, activeProject, projects)
+  const activeDirector = projectVisualDirector(activeProject, normalizedActiveConfig)
+  const suggestionContext = { appType: normalizedActiveConfig.appType, activePacks: configSettings.filter((setting) => setting.section === 'business' && isScopeSetting(setting.id) && resolveScope(normalizedActiveConfig, setting.id).active).map((setting) => setting.label), projectContext: projectContextEntries(activeProject.context).map((entry) => entry.value).join(' '), dna: activeProject.dna }
+  const patternIntel = patternExplorerIntelligence({
+    patterns: allPatterns,
+    config: normalizedActiveConfig,
+    context: suggestionContext,
+    director: activeDirector,
+    selectedPatternIds: activeProject.selected,
+    history: projects.filter((project) => project.id !== activeProject.id).map((project) => ({ id: project.id, name: project.name, dna: project.dna, selectedPatternIds: project.selected, directionName: projectVisualDirector(project).directionName })),
+  })
+  const pageIntel = projectPageComposition(activeProject, patternIntel, selectedPatterns, normalizedActiveConfig)
+  const activeApprovalInput = projectApprovalInput(activeProject, patternIntel, selectedPatterns, normalizedActiveConfig, activeDirector, pageIntel)
+  const activeApproval = evaluateVisualApproval(activeProject.approvedVisualContract, activeApprovalInput)
+  const activeVisualContradictions = visualContradictionSignals(activeProject.dna, resolvedPatterns, activeProject.context).map((signal) => signal.detail)
 
   const toggleCapability = (id: string) => {
     const capability = allCapabilities.find((item) => item.id === id)
@@ -927,6 +1169,54 @@ export default function App() {
 
   const togglePattern = (id: string) => {
     updateProject((project) => ({ selected: project.selected.includes(id) ? project.selected.filter((item) => item !== id) : [...project.selected, id] }))
+  }
+
+  const applyPatternRecommendation = (recommendation: DirectionRecommendation) => {
+    updateProject((project) => ({ dna: recommendation.proposedDna, selected: Array.from(new Set([...project.selected, ...recommendation.bundle.patternIds])) }))
+    notify(`${recommendation.name} applied with ${recommendation.bundle.patternIds.length} compatible pattern${recommendation.bundle.patternIds.length === 1 ? '' : 's'}.`)
+  }
+
+  const commitPreviewRefinement = (dna: Dna, recommendation?: DirectionRecommendation) => {
+    updateProject((project) => ({
+      dna: normalizeDna(dna),
+      selected: recommendation ? Array.from(new Set([...project.selected, ...recommendation.bundle.patternIds])) : project.selected,
+    }))
+    notify(recommendation ? `${recommendation.name} preview refinement saved to Blueprint.` : 'Preview refinement saved to Blueprint.')
+  }
+
+  const approvePreview = (dna: Dna, recommendation?: DirectionRecommendation) => {
+    const nextDna = normalizeDna(dna)
+    const nextSelected = recommendation
+      ? Array.from(new Set([...activeProject.selected, ...recommendation.bundle.patternIds]))
+      : [...activeProject.selected]
+    const nextProject: Project = { ...activeProject, dna: nextDna, selected: nextSelected }
+    const nextSelectedPatterns = allPatterns.filter((pattern) => nextSelected.includes(pattern.id))
+    const nextConfig = normalizeProjectConfig(nextProject.config)
+    const nextDirector = projectVisualDirector(nextProject, nextConfig)
+    const nextSuggestionContext = {
+      appType: nextConfig.appType,
+      activePacks: configSettings.filter((setting) => setting.section === 'business' && isScopeSetting(setting.id) && resolveScope(nextConfig, setting.id).active).map((setting) => setting.label),
+      projectContext: projectContextEntries(nextProject.context).map((entry) => entry.value).join(' '),
+      dna: nextDna,
+    }
+    const nextPatternIntel = patternExplorerIntelligence({
+      patterns: allPatterns,
+      config: nextConfig,
+      context: nextSuggestionContext,
+      director: nextDirector,
+      selectedPatternIds: nextSelected,
+      history: projects.filter((project) => project.id !== activeProject.id).map((project) => ({ id: project.id, name: project.name, dna: project.dna, selectedPatternIds: project.selected, directionName: projectVisualDirector(project).directionName })),
+    })
+    const nextPageIntel = projectPageComposition(nextProject, nextPatternIntel, nextSelectedPatterns, nextConfig)
+    const approvalInput = projectApprovalInput(nextProject, nextPatternIntel, nextSelectedPatterns, nextConfig, nextDirector, nextPageIntel)
+    const approvedVisualContract = createApprovedVisualContract({ ...approvalInput, direction: recommendation })
+    updateProject({ dna: nextDna, selected: nextSelected, approvedVisualContract })
+    notify(`${approvedVisualContract.direction.name} approved for implementation.`)
+  }
+
+  const revokeVisualApproval = () => {
+    updateProject({ approvedVisualContract: undefined })
+    notify('Visual approval removed. Current visual state is editable again.')
   }
 
   const toggleCompare = (id: string) => {
@@ -994,6 +1284,7 @@ export default function App() {
       coreFlows: structuredClone(activeProject.coreFlows),
       references: activeProject.references.map((ref) => ({ ...ref, id: uid('ref') })),
       snapshots: [],
+      approvedVisualContract: undefined,
     }
     setProjects((current) => [...current, clone])
     setActiveProjectId(clone.id)
@@ -1025,6 +1316,7 @@ export default function App() {
       references: structuredClone(activeProject.references),
       context: structuredClone(activeProject.context),
       coreFlows: structuredClone(activeProject.coreFlows),
+      approvedVisualContract: activeProject.approvedVisualContract ? structuredClone(activeProject.approvedVisualContract) : undefined,
     }
     updateProject((project) => ({ snapshots: [snapshot, ...project.snapshots].slice(0, 24) }))
     notify('Design checkpoint saved')
@@ -1040,6 +1332,7 @@ export default function App() {
       ...(snapshot.references ? { references: structuredClone(snapshot.references) } : {}),
       ...(snapshot.context ? { context: normalizeProjectContext(snapshot.context) } : {}),
       ...(snapshot.coreFlows ? { coreFlows: normalizeCoreFlows(snapshot.coreFlows) } : {}),
+      approvedVisualContract: normalizeApprovedVisualContract(snapshot.approvedVisualContract),
     })
     notify('Checkpoint restored')
   }
@@ -1159,8 +1452,8 @@ export default function App() {
         })
       }
       const bundle: BackupBundle = {
-        version: 12,
-        blueprintVersion: '0.24.0',
+        version: 14,
+        blueprintVersion: '0.31.0',
         exportedAt: now(),
         activeProjectId: activeProject.id,
         projects: cleanProjects,
@@ -1180,7 +1473,7 @@ export default function App() {
     let preImportSavedAt: string | undefined
     try {
       const parsed = JSON.parse(await file.text()) as Partial<BackupBundle> & { version?: number }
-      if (![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(Number(parsed.version)) || !Array.isArray(parsed.projects) || !parsed.projects.length) throw new Error('Not a compatible Blueprint backup.')
+      if (![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].includes(Number(parsed.version)) || !Array.isArray(parsed.projects) || !parsed.projects.length) throw new Error('Not a compatible Blueprint backup.')
 
       let restored = parsed.projects.map(normalizeProject)
       const backupAssets = Array.isArray(parsed.assets) ? parsed.assets : []
@@ -1248,9 +1541,10 @@ export default function App() {
     }
   }
 
-  const markdown = buildMarkdown(activeProject, selectedPatterns, selectedCapabilities, similarity)
-  const agentPrompt = buildAgentPrompt(activeProject, selectedPatterns, selectedCapabilities)
+  const markdown = buildMarkdown(activeProject, selectedPatterns, selectedCapabilities, similarity, patternIntel)
+  const agentPrompt = buildAgentPrompt(activeProject, selectedPatterns, selectedCapabilities, patternIntel)
   const docsManifest = buildDocsManifest(activeProject, selectedCapabilities)
+  const blueprintReference = buildBlueprintReference(activeProject, selectedPatterns, patternIntel)
 
   const navigate = (next: View) => {
     setView(next)
@@ -1262,6 +1556,7 @@ export default function App() {
     { id: 'home' as View, label: 'Workspace', icon: Home },
     { id: 'setup' as View, label: 'App setup', icon: Settings2, count: (activeProject.config.overrides.length + Object.keys(activeProject.config.scopeChoices ?? {}).length) || undefined },
     { id: 'dna' as View, label: 'Visual Studio', icon: Palette },
+    { id: 'preview' as View, label: 'Preview Studio', icon: Eye },
     { id: 'spec' as View, label: 'Generated spec', icon: ClipboardList },
   ]
   const toolNav = [
@@ -1287,7 +1582,7 @@ export default function App() {
         <button className={`nav-tools-toggle ${(showPowerTools || powerToolActive) ? 'open' : ''}`} onClick={() => setShowPowerTools((value) => !value)} aria-expanded={showPowerTools || powerToolActive}><span>More tools</span><ChevronDown size={14}/></button>
         {(showPowerTools || powerToolActive) && <div className="nav-tools">{toolNav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)}><item.icon size={16}/><span>{item.label}</span>{item.count ? <b>{item.count}</b> : null}</button>)}</div>}
       </nav>
-      <div className="sidebar-note"><div className="eyebrow"><WandSparkles size={13}/> Configurable core</div><p>Auto resolves scope. Customize only the product decisions your project actually needs.</p></div>
+      <div className="sidebar-note"><div className="eyebrow"><WandSparkles size={13}/> Configurable core</div><p>Recommendations stay advisory. Optional product scope is included only when you select it or a real dependency requires it.</p></div>
       <SaveStatus status={saveState} onRetry={() => setSaveRetryNonce((value) => value + 1)}/>
     </aside>
 
@@ -1296,22 +1591,23 @@ export default function App() {
     {mobileMenu && <div className="mobile-drawer-wrap" onMouseDown={() => setMobileMenu(false)}><aside className="mobile-drawer" onMouseDown={(event) => event.stopPropagation()}><div className="drawer-head"><strong>{activeProject.name}</strong><button className="icon-button" onClick={() => setMobileMenu(false)} aria-label="Close menu"><X size={18}/></button></div><div className="drawer-group-label">Core flow</div>{coreNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}<div className="drawer-group-label">More tools</div>{toolNav.map((item) => <button className="drawer-nav" key={item.id} onClick={() => navigate(item.id)}><item.icon size={17}/>{item.label}<ChevronRight size={15}/></button>)}</aside></div>}
 
     <main className="main-content">
-      {view === 'home' && <HomeView project={activeProject} projects={projects} patterns={allPatterns} recommendations={recommendations} similarity={similarity} setView={navigate} updateProject={updateProject} create={() => setShowProjectCreate(true)} duplicate={duplicateProject} remove={deleteProject} addSnapshot={addSnapshot} restoreSnapshot={restoreSnapshot} exportBackup={exportBackup} importRef={importRef} importBackup={importBackup}/>} 
+      {view === 'home' && <HomeView project={activeProject} projects={projects} patterns={allPatterns} recommendations={recommendations} similarity={similarity} patternIntel={patternIntel} setView={navigate} updateProject={updateProject} create={() => setShowProjectCreate(true)} duplicate={duplicateProject} remove={deleteProject} addSnapshot={addSnapshot} restoreSnapshot={restoreSnapshot} exportBackup={exportBackup} importRef={importRef} importBackup={importBackup}/>} 
       {view === 'setup' && <SetupView project={activeProject} updateProject={updateProject} notify={notify} presets={configPresets} savePreset={saveConfigPreset} applyPreset={applyConfigPreset} deletePreset={deleteConfigPreset} setView={navigate}/>} 
       {view === 'flows' && <CoreFlowsView project={activeProject} updateProject={updateProject} notify={notify}/>} 
       {view === 'roadmap' && <RoadmapView project={activeProject} copy={copy} setView={navigate}/>} 
-      {view === 'patterns' && <PatternsView patterns={allPatterns} selected={activeProject.selected} config={normalizedActiveConfig} compareIds={compareIds} search={search} setSearch={setSearch} category={category} setCategory={setCategory} level={level} setLevel={setLevel} setDetail={setDetail} toggle={togglePattern} toggleCompare={toggleCompare} compare={() => navigate('compare')} addCustom={() => setShowCustom(true)} learningMode={learningMode} setLearningMode={setLearningMode}/>} 
+      {view === 'patterns' && <PatternsView patterns={allPatterns} selected={activeProject.selected} config={normalizedActiveConfig} intelligence={patternIntel} applyRecommended={applyPatternRecommendation} compareIds={compareIds} search={search} setSearch={setSearch} category={category} setCategory={setCategory} level={level} setLevel={setLevel} setDetail={setDetail} toggle={togglePattern} toggleCompare={toggleCompare} compare={() => navigate('compare')} addCustom={() => setShowCustom(true)} learningMode={learningMode} setLearningMode={setLearningMode}/>} 
       {view === 'capabilities' && <CapabilitiesView capabilities={allCapabilities} selected={activeProject.capabilities} config={normalizedActiveConfig} search={capSearch} setSearch={setCapSearch} category={capCategory} setCategory={setCapCategory} level={capLevel} setLevel={setCapLevel} toggle={toggleCapability} addCustom={() => setShowCustomCapability(true)} removeCustom={removeCustomCapability}/>} 
       {view === 'docs' && <DocsView project={activeProject} selectedCapabilities={resolvedCapabilities} toggle={toggleDoc} updateProject={updateProject} copy={copy}/>} 
       {view === 'compare' && <CompareView ids={compareIds} patterns={allPatterns} selected={activeProject.selected} toggle={togglePattern} removeCompare={toggleCompare} browse={() => navigate('patterns')} learningMode={learningMode}/>} 
-      {view === 'dna' && <><VisualStudio dna={activeProject.dna} onChange={(dna) => updateProject({ dna })} suggestionContext={{ appType: normalizedActiveConfig.appType, activePacks: configSettings.filter((setting) => setting.section === 'business' && isScopeSetting(setting.id) && resolveScope(normalizedActiveConfig, setting.id).active).map((setting) => setting.label), projectContext: projectContextEntries(activeProject.context).map((entry) => entry.value).join(' '), dna: activeProject.dna }} recommendations={recommendations} onAddPattern={togglePattern} onOpenPattern={setDetail} sanity={designSanity}/><div className="flow-next"><div><span>Next</span><strong>Implementation brief</strong><small>Review the resolved scope and visual direction together before handing it to a coding agent.</small></div><button className="primary-button" onClick={() => navigate('spec')}>Review generated spec <ArrowRight size={15}/></button></div></>} 
+      {view === 'dna' && <><VisualStudio dna={activeProject.dna} onChange={(dna) => updateProject({ dna })} suggestionContext={suggestionContext} director={activeDirector} recommendations={recommendations} onAddPattern={togglePattern} onOpenPattern={setDetail} sanity={designSanity}/><div className="flow-next"><div><span>Next</span><strong>Visual Preview Studio</strong><small>See the generated page composition across A/B/C directions before handing anything to a coding agent.</small></div><button className="primary-button" onClick={() => navigate('preview')}>Open live preview <Eye size={15}/></button></div></>} 
+      {view === 'preview' && <PreviewStudio projectName={activeProject.name} dna={activeProject.dna} director={activeDirector} patternIntel={patternIntel} pageIntel={pageIntel} visualContradictions={activeVisualContradictions} approval={activeApproval} onCommit={commitPreviewRefinement} onApprove={approvePreview} onRevokeApproval={revokeVisualApproval}/>} 
       {view === 'references' && <ReferencesView project={activeProject} add={() => setShowReference(true)} remove={removeReference}/>} 
       {view === 'inspiration' && <InspirationView addReference={() => setShowReference(true)}/>} 
-      {view === 'spec' && <SpecView project={activeProject} selectedPatterns={selectedPatterns} selectedCapabilities={selectedCapabilities} similarity={similarity} markdown={markdown} agentPrompt={agentPrompt} docsManifest={docsManifest} copy={copy} updateProject={updateProject} addSnapshot={addSnapshot} setView={navigate}/>} 
+      {view === 'spec' && <SpecView project={activeProject} selectedPatterns={selectedPatterns} selectedCapabilities={selectedCapabilities} similarity={similarity} patternIntel={patternIntel} pageIntel={pageIntel} markdown={markdown} agentPrompt={agentPrompt} blueprintReference={blueprintReference} docsManifest={docsManifest} copy={copy} updateProject={updateProject} addSnapshot={addSnapshot} setView={navigate}/>} 
     </main>
 
     <nav className="mobile-bottom-nav">
-      {[{ id: 'home' as View, icon: Home, label: 'Home' }, { id: 'setup' as View, icon: Settings2, label: 'Setup' }, { id: 'dna' as View, icon: Palette, label: 'Studio' }, { id: 'spec' as View, icon: ClipboardList, label: 'Spec' }].map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => navigate(item.id)}><item.icon size={18}/><span>{item.label}</span></button>)}
+      {[{ id: 'home' as View, icon: Home, label: 'Home' }, { id: 'setup' as View, icon: Settings2, label: 'Setup' }, { id: 'preview' as View, icon: Eye, label: 'Preview' }, { id: 'spec' as View, icon: ClipboardList, label: 'Spec' }].map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => navigate(item.id)}><item.icon size={18}/><span>{item.label}</span></button>)}
       <button className={powerToolActive ? 'active' : ''} onClick={() => setMobileMenu(true)} aria-label="Open more tools"><Menu size={18}/><span>More</span></button>
     </nav>
 
@@ -1385,6 +1681,8 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   }, [config.profile, config.operationalScale])
   const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
+  const contextDecisions = contextGapDecisions(project.context, config)
+  const setupIncompleteSignal = contextSignals.find((signal) => signal.id === 'context-recommended-setup-incomplete')
   const readiness = configReadiness(config)
   const typeMatches = appTypeMatches(config)
   const alternateTypeMatches = typeMatches.filter((match) => match.appType !== config.appType && match.score >= 88)
@@ -1439,7 +1737,7 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
   const matchingSettings = (sectionId: string) => configSettings.filter((setting) => {
     if (setting.section !== sectionId || !settingIsActive(setting, config)) return false
     const scope = isScopeSetting(setting.id) ? resolveScope(config, setting.id) : null
-    const dormantAutoScope = scope && scope.choice === 'Auto' && !scope.active && !setting.dependsOn
+    const dormantAutoScope = scope && scope.choice === 'Auto' && scope.state === 'off' && !setting.dependsOn
     if (dormantAutoScope && !showAvailableScope && !normalizedQuery && !customOnly) return false
     if (customOnly && !config.overrides.includes(setting.id) && scopeChoice(config, setting.id) === 'Auto') return false
     if (!normalizedQuery && !customOnly && !settingVisibleAtDepth(setting, configDepth)) return false
@@ -1474,12 +1772,14 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
         </div>}
         <div className="setup-depth"><div className="setup-depth-heading"><span>How much detail do you want to review?</span><small>This changes presentation only. Search can still reach every setting.</small></div><div>{configDepths.map((depth) => <button key={depth.value} className={configDepth === depth.value ? 'active' : ''} onClick={() => setConfigDepth(depth.value)}><strong>{depth.label}</strong><small>{depth.description}</small></button>)}</div></div>
       </div>
-      <aside className="setup-status"><div className="setup-ready"><Gauge size={17}/><div><span>Blueprint readiness</span><strong>{readiness.label}</strong><p>{readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''} · fix before implementation handoff.` : readiness.important ? `${readiness.important} important signal${readiness.important > 1 ? 's' : ''} · deliberate review required.` : readiness.review || readiness.advisory ? `${readiness.review + readiness.advisory} lower-severity review signal${readiness.review + readiness.advisory > 1 ? 's' : ''}.` : 'No App Setup review signals.'} <span>{readiness.score}% coherence indicator · {readiness.coverage}% contract coverage.</span></p></div></div><div className="setup-stat-row"><div><strong>{visibleDecisionCount}</strong><span>available in {configDepth.toLowerCase()}</span></div><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{reviewSignals.length + contextSignals.length}</strong><span>review signals</span></div></div></aside>
+      <aside className={`setup-status ${setupIncompleteSignal ? 'setup-status-incomplete' : ''}`}><div className="setup-ready"><Gauge size={17}/><div><span>Blueprint readiness</span><strong>{setupIncompleteSignal ? 'Recommended setup incomplete' : readiness.label}</strong><p>{setupIncompleteSignal ? 'Your Project Context describes a clear public-site outcome that current active scope cannot reasonably deliver. Review the recommended scope before implementation; nothing has been activated automatically.' : readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''} · fix before implementation handoff.` : readiness.important ? `${readiness.important} important signal${readiness.important > 1 ? 's' : ''} · deliberate review required.` : readiness.review || readiness.advisory ? `${readiness.review + readiness.advisory} lower-severity review signal${readiness.review + readiness.advisory > 1 ? 's' : ''}.` : 'No App Setup review signals.'} <span>{readiness.score}% coherence indicator · {readiness.coverage}% contract coverage.</span></p></div></div><div className="setup-stat-row"><div><strong>{visibleDecisionCount}</strong><span>available in {configDepth.toLowerCase()}</span></div><div><strong>{config.overrides.length + Object.keys(config.scopeChoices).length}</strong><span>deliberate choices</span></div><div><strong>{reviewSignals.length + contextSignals.length}</strong><span>review signals</span></div></div></aside>
     </section>
 
     <ProjectContextPanel project={project} updateProject={updateProject}/>
 
-    {contextSignals.length > 0 && <section className="context-review-signals"><Lightbulb size={18}/><div><strong>Project Context review · suggestion only</strong><p>These signals do not change App Setup. They only flag possible mismatches between your human description and deterministic structured scope.</p>{contextSignals.map((signal) => <div className="context-review-row" key={signal.id}><div><strong>{signal.title}</strong><span>{signal.detail}</span></div><button className="text-button" onClick={() => jumpToSection(signal.targetSection)}>Review scope <ArrowRight size={13}/></button></div>)}</div></section>}
+    {contextSignals.length > 0 && <section className={`context-review-signals ${setupIncompleteSignal ? 'has-important-context' : ''}`}><Lightbulb size={18}/><div><strong>{setupIncompleteSignal ? 'Recommended setup incomplete · review required' : 'Project Context review · suggestion only'}</strong><p>These signals do not change App Setup. They only flag possible mismatches between your human description and deterministic structured scope.</p>{contextSignals.map((signal) => <div className={`context-review-row ${signal.severity === 'important' ? 'important' : ''}`} key={signal.id}><div><strong>{signal.title}</strong><span>{signal.detail}</span></div><button className="text-button" onClick={() => jumpToSection(signal.targetSection)}>Review scope <ArrowRight size={13}/></button></div>)}</div></section>}
+
+    {contextDecisions.length > 0 && <section className="context-gap-decisions"><div className="eyebrow">Context-aware gap filling · {String(effectiveConfigValue(config, 'intelligence.contextGapMode'))}</div><p>Low-risk presentation/detail decisions carry <code>context_completion</code> provenance. Items held for scope are not implementation instructions until the relevant public surface is explicitly included.</p><div>{contextDecisions.slice(0, 5).map((decision) => <article key={decision.id} className={decision.status}><span>{decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · {decision.confidence}</span><strong>{decision.decision}</strong><small>{decision.reason}</small></article>)}</div></section>}
 
     <section className="setup-intelligence" aria-label="Blueprint intelligence review">
       <div className="intelligence-card readiness-card">
@@ -1527,7 +1827,7 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
       </div>
     </div>
 
-    <div className="setup-note"><Sparkles size={16}/><p><strong>{configDepth} configuration depth.</strong> Operational scale is <strong>{resolvedOperationalScale(config)}{config.operationalScale === 'Auto' ? ' (Auto)' : ''}</strong>; it tunes engineering/operations proportionality without creating product features. Blueprint resolves <strong>{activeDecisionCount}</strong> active contract decisions from the 918-setting knowledge base, but this view only asks you to review the level of detail you chose. <strong>{hiddenByDepthCount}</strong> deeper active decision{hiddenByDepthCount === 1 ? ' is' : 's are'} currently handled by contextual defaults. Search ignores the depth filter, so an advanced setting is always one search away. Explicit On/Off still wins; required dependencies and valid child choices are inferred automatically. {activeBusinessPacks.length ? <> Active business packs: <strong>{activeBusinessPacks.join(', ')}</strong>.</> : <> No business pack is forced for this project.</>} {activeIntegrationFamilies.length ? <> Connected-service families currently enabled: <strong>{activeIntegrationFamilies.join(', ')}</strong>.</> : <> External channels and AI remain opt-in until the project actually needs them.</>}</p></div>
+    <div className="setup-note"><Sparkles size={16}/><p><strong>{configDepth} configuration depth.</strong> Operational scale is <strong>{resolvedOperationalScale(config)}{config.operationalScale === 'Auto' ? ' (Auto)' : ''}</strong>; it tunes engineering/operations proportionality without creating product features. Blueprint resolves <strong>{activeDecisionCount}</strong> active contract decisions from the 918-setting knowledge base, but this view only asks you to review the level of detail you chose. <strong>{hiddenByDepthCount}</strong> deeper active decision{hiddenByDepthCount === 1 ? ' is' : 's are'} currently handled by implementation defaults inside active scope. Search ignores the depth filter, so an advanced setting is always one search away. Explicit On/Off still wins; required dependencies and valid child choices are inferred automatically. {activeBusinessPacks.length ? <> Active business packs: <strong>{activeBusinessPacks.join(', ')}</strong>.</> : <> No business pack is forced for this project.</>} {activeIntegrationFamilies.length ? <> Connected-service families currently enabled: <strong>{activeIntegrationFamilies.join(', ')}</strong>.</> : <> External channels and AI remain opt-in until the project actually needs them.</>}</p></div>
 
     {hiddenOverrideCount > 0 && <div className="setup-note setup-inactive-note"><History size={16}/><p><strong>{hiddenOverrideCount} customized choice{hiddenOverrideCount > 1 ? 's are' : ' is'} currently inactive.</strong> Blueprint is preserving {hiddenOverrideCount > 1 ? 'them' : 'it'} because a parent feature is off or no longer relevant. Re-enable the parent and your choice returns automatically.</p></div>}
     {customizedHiddenByDepthCount > 0 && !normalizedQuery && !customOnly && <div className="setup-note setup-depth-note"><Settings2 size={16}/><p><strong>{customizedHiddenByDepthCount} customized active choice{customizedHiddenByDepthCount > 1 ? 's are' : ' is'} hidden by {configDepth} view.</strong> Nothing was reset. Switch to a deeper level, use <strong>Show customized</strong>, or search for the setting to edit it directly.</p></div>}
@@ -1574,17 +1874,17 @@ function SetupView({ project, updateProject, notify, presets, savePreset, applyP
                 const guidance = settingGuidance(setting, config)
                 const provenance = settingRecommendationProvenance(setting, config)
                 return <div className={`setup-setting ${customized ? 'customized' : ''} ${scope ? 'scope-setting' : ''}`} key={setting.id}>
-                  <div className="setup-setting-copy"><div><strong>{setting.label}</strong><span className={`guidance-badge guidance-${guidance.toLowerCase().replace(/\s+/g, '-')}`}>{guidance}</span>{normalizedQuery && <span className={`depth-badge depth-${settingDepth(setting).toLowerCase()}`}>{settingDepth(setting)}</span>}{customized && <span className="custom-badge">{deliberateScope ? 'Explicit scope' : 'Customized'}</span>}</div><p>{setting.description}</p>{scope ? <small className="scope-explanation"><b>{scope.choice === 'Auto' ? `Auto → ${scope.active ? 'On' : 'Off'}` : scope.choice}</b> · {scope.reason}</small> : <small className="recommendation-why" title={`Recommended: ${formatConfigValue(expected)}`}><b>{provenance.source}</b> · {provenance.reason}</small>}{setting.caution && customized && <em>{setting.caution}</em>}</div>
+                  <div className="setup-setting-copy"><div><strong>{setting.label}</strong><span className={`guidance-badge guidance-${guidance.toLowerCase().replace(/\s+/g, '-')}`}>{guidance}</span>{normalizedQuery && <span className={`depth-badge depth-${settingDepth(setting).toLowerCase()}`}>{settingDepth(setting)}</span>}{customized && <span className="custom-badge">{deliberateScope ? 'Explicit scope' : 'Customized'}</span>}</div><p>{setting.description}</p>{scope ? <small className="scope-explanation"><b>{scope.state === 'on' ? 'Selected' : scope.state === 'required' ? 'Required' : scope.state === 'suggested' ? 'Suggested' : 'Not included'}</b> · {scope.reason}</small> : <small className="recommendation-why" title={`Recommended: ${formatConfigValue(expected)}`}><b>{provenance.source}</b> · {provenance.reason}</small>}{setting.caution && customized && <em>{setting.caution}</em>}</div>
                   <div className="setup-setting-control">
                     {scope ? <>
                       <div className="scope-control" aria-label={`${setting.label} scope`}>
-                        {(['Auto', 'On', 'Off'] as const).map((choice) => <button key={choice} className={scope.choice === choice ? 'active' : ''} onClick={() => setConfig(setScopeChoice(config, setting.id, choice))}>{choice}</button>)}
+                        {(['Auto', 'On', 'Off'] as const).map((choice) => <button key={choice} className={scope.choice === choice ? 'active' : ''} onClick={() => setConfig(setScopeChoice(config, setting.id, choice))}>{choice === 'Auto' ? 'Default' : choice === 'On' ? 'Include' : 'Exclude'}</button>)}
                       </div>
                       {scope.active && !booleanValue && onOptions.length > 1 && <label className="setup-select scope-behavior"><span>Behavior</span><select value={String(effectiveValue)} onChange={(event) => changeValue(setting.id, event.target.value)}>{onOptions.map((option) => <option key={option.value} value={option.value}>{option.label || option.value}</option>)}</select><ChevronDown size={14}/></label>}
                     </> : booleanValue ? <div className="binary-control">{[true, false].map((option) => <button key={String(option)} className={value === option ? 'active' : ''} onClick={() => changeValue(setting.id, option)}>{option ? 'Yes' : 'No'}</button>)}</div> : options.length <= 4 ? <div className="choice-control">{options.map((option) => <button key={option.value} className={value === option.value ? 'active' : ''} onClick={() => changeValue(setting.id, option.value)}>{option.label || option.value}</button>)}</div> : <label className="setup-select"><select value={String(value)} onChange={(event) => changeValue(setting.id, event.target.value)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label || option.value}</option>)}</select><ChevronDown size={14}/></label>}
                     {selectedNote && <small className="setup-option-note">{selectedNote}</small>}
                     {scope ? <div className="setting-reset-row">
-                      {deliberateScope && <button className="setting-reset" onClick={() => setConfig(setScopeChoice(config, setting.id, 'Auto'))} title="Return scope to Auto without discarding a deliberate behavior choice"><RefreshCw size={13}/> Auto scope</button>}
+                      {deliberateScope && <button className="setting-reset" onClick={() => setConfig(setScopeChoice(config, setting.id, 'Auto'))} title="Clear the explicit scope choice without discarding a deliberate behavior choice"><RefreshCw size={13}/> Clear scope choice</button>}
                       {overridden && <button className="setting-reset" onClick={() => resetValue(setting.id)} title="Reset this feature's behavior to the contextual recommendation"><RefreshCw size={13}/> Reset behavior</button>}
                     </div> : customized && <button className="setting-reset" onClick={() => resetValue(setting.id)} title="Reset to recommended"><RefreshCw size={13}/> Reset</button>}
                   </div>
@@ -1827,12 +2127,13 @@ function snapshotComparison(project: Project, snapshot: Snapshot) {
   return { total, configChanges, addedPatterns, removedPatterns, capabilityChanges, docChanges, dnaChanges, contextChanges, flowChanges }
 }
 
-function HomeView({ project, projects, recommendations, similarity, setView, updateProject, create, duplicate, remove, addSnapshot, restoreSnapshot, exportBackup, importRef, importBackup }: {
+function HomeView({ project, projects, recommendations, similarity, patternIntel, setView, updateProject, create, duplicate, remove, addSnapshot, restoreSnapshot, exportBackup, importRef, importBackup }: {
   project: Project
   projects: Project[]
   patterns: Pattern[]
   recommendations: ReturnType<typeof recommendPatterns>
   similarity: ReturnType<typeof similarityReport>
+  patternIntel: PatternExplorerIntelligence
   setView: (view: View) => void
   updateProject: (patch: Partial<Project> | ((project: Project) => Partial<Project>)) => void
   create: () => void
@@ -1844,7 +2145,7 @@ function HomeView({ project, projects, recommendations, similarity, setView, upd
   importRef: React.RefObject<HTMLInputElement | null>
   importBackup: (file: File) => void
 }) {
-  const score = similarity.score
+  const score = patternIntel.antiHomogeneity.similarity
   const [compareCheckpointId, setCompareCheckpointId] = useState('')
   const compareCheckpoint = project.snapshots.find((snapshot) => snapshot.id === compareCheckpointId)
   const checkpointDiff = compareCheckpoint ? snapshotComparison(project, compareCheckpoint) : null
@@ -1866,7 +2167,7 @@ function HomeView({ project, projects, recommendations, similarity, setView, upd
       </div>
       <div className="variety-card">
         <div className="variety-gauge"><div className="gauge-ring" style={{ '--score': score ?? 0 } as React.CSSProperties}><strong>{score === null ? '—' : `${score}%`}</strong><span>closest match</span></div></div>
-        <div><div className="eyebrow"><RefreshCw size={12}/> Anti-sameness</div><h3>{similarity.label}</h3><p>{score === null ? 'Create another workspace and Blueprint can start comparing your visual habits.' : `Closest to “${similarity.project?.name}”. Similarity blends selected patterns and Visual Studio—not just colors.`}</p></div>
+        <div><div className="eyebrow"><RefreshCw size={12}/> Anti-homogeneity · v0.28</div><h3>{patternIntel.antiHomogeneity.level} similarity risk</h3><p>{patternIntel.antiHomogeneity.summary}</p><button className="text-button" onClick={() => setView('patterns')}>Review repeated traits <ArrowRight size={13}/></button></div>
       </div>
     </section>
 
@@ -1893,10 +2194,12 @@ function HomeView({ project, projects, recommendations, similarity, setView, upd
   </>
 }
 
-function PatternsView({ patterns: allPatterns, selected, config, compareIds, search, setSearch, category, setCategory, level, setLevel, setDetail, toggle, toggleCompare, compare, addCustom, learningMode, setLearningMode }: {
+function PatternsView({ patterns: allPatterns, selected, config, intelligence, applyRecommended, compareIds, search, setSearch, category, setCategory, level, setLevel, setDetail, toggle, toggleCompare, compare, addCustom, learningMode, setLearningMode }: {
   patterns: Pattern[]
   selected: string[]
   config: ProjectConfig
+  intelligence: PatternExplorerIntelligence
+  applyRecommended: (recommendation: DirectionRecommendation) => void
   compareIds: string[]
   search: string
   setSearch: (value: string) => void
@@ -1917,8 +2220,14 @@ function PatternsView({ patterns: allPatterns, selected, config, compareIds, sea
     return (!search || haystack.includes(search.toLowerCase())) && (category === 'All' || pattern.category === category) && (level === 'All' || pattern.level === level)
   })
 
+  const best = intelligence.recommendations.find((item) => item.tier === 'best_match')
   return <>
-    <PageHeader eyebrow="Pattern explorer" title="See the pattern before you try to remember its name." copy="Browse familiar, less-common, and experimental UI patterns. Visual guides are intentionally schematic so you learn the structure instead of copying one finished design." action={<div className="header-actions"><button className="secondary-button" onClick={() => { const candidates = filtered.filter((item) => !selected.includes(item.id) && item.level !== 'Familiar'); setDetail(candidates[Math.floor(Math.random() * candidates.length)] || filtered[Math.floor(Math.random() * filtered.length)] || null) }}><WandSparkles size={15}/> Surprise me</button><button className="primary-button" onClick={addCustom}><Plus size={16}/> Add discovery</button></div>}/>
+    <PageHeader eyebrow="Pattern Explorer 2.0 · v0.28" title="Recommended first. Pattern library second." copy="Blueprint now proposes a Best Match and coherent alternatives from your product context, Visual Director, hard constraints, and saved-project history. Browse the full library only when you want to override or learn." action={<div className="header-actions"><button className="secondary-button" onClick={() => { const candidates = filtered.filter((item) => !selected.includes(item.id) && item.level !== 'Familiar'); setDetail(candidates[Math.floor(Math.random() * candidates.length)] || filtered[Math.floor(Math.random() * filtered.length)] || null) }}><WandSparkles size={15}/> Surprise me</button><button className="primary-button" onClick={addCustom}><Plus size={16}/> Add discovery</button></div>}/>
+    <section className="pattern-intelligence">
+      <div className="pattern-intelligence-head"><div><div className="eyebrow"><Sparkles size={13}/> Recommended for this project</div><h2>Choose a coherent direction, not isolated tricks.</h2><p>Recommendations are advisory until you explicitly apply one. Using a direction updates visual settings and adds only its currently compatible pattern bundle; it never turns on functional scope.</p></div>{best && <button className="primary-button" onClick={() => applyRecommended(best)}><Sparkles size={15}/> Use Recommended Direction</button>}</div>
+      <div className="direction-intelligence-grid">{intelligence.recommendations.map((recommendation, index) => <article key={recommendation.id} className={`direction-intelligence-card ${recommendation.tier === 'best_match' ? 'best' : ''}`}><div className="direction-intelligence-top"><span>{recommendation.tier === 'best_match' ? 'BEST MATCH' : recommendation.tier === 'good_fit' ? 'GOOD FIT' : 'ALTERNATIVE'}</span><b>{recommendation.originality}</b></div><h3>{recommendation.name}</h3><p>{recommendation.description}</p><div className="direction-intelligence-facts"><div><span>Why it fits</span><p>{recommendation.whyItFits}</p></div><div><span>Possible drawback</span><p>{recommendation.drawback}</p></div></div><div className={`compatibility-line ${recommendation.compatibility}`}><Check size={13}/><span>{recommendation.compatibility === 'compatible' ? 'Compatible with active constraints' : 'Compatible with caveats'} · {recommendation.compatibilityNotes[0]}</span></div><div className="bundle-strip"><span>Pattern bundle</span><div>{recommendation.bundle.patterns.length ? recommendation.bundle.patterns.map((pattern) => <button key={pattern.id} onClick={() => setDetail(pattern)}>{pattern.name}</button>) : <small>No additional patterns required.</small>}</div></div><button className={recommendation.tier === 'best_match' ? 'primary-button compact' : 'secondary-button compact'} onClick={() => applyRecommended(recommendation)}>{index === 0 ? 'Use Recommended Direction' : `Use ${recommendation.name}`}</button></article>)}</div>
+      <div className={`anti-homogeneity-card risk-${intelligence.antiHomogeneity.level.toLowerCase()}`}><div><div className="eyebrow"><RefreshCw size={12}/> Anti-homogeneity</div><h3>{intelligence.antiHomogeneity.level} similarity risk{intelligence.antiHomogeneity.similarity === null ? '' : ` · ${intelligence.antiHomogeneity.similarity}%`}</h3><p>{intelligence.antiHomogeneity.summary}</p></div><div className="anti-homogeneity-columns"><div><span>Repeated traits</span>{intelligence.antiHomogeneity.repeatedTraits.length ? intelligence.antiHomogeneity.repeatedTraits.map((trait) => <p key={trait}>• {trait}</p>) : <p>• No repeated dominant traits detected yet.</p>}</div><div><span>Context-safe diversification</span>{intelligence.antiHomogeneity.diversification.map((item) => <p key={item}>• {item}</p>)}</div></div></div>
+    </section>
     <div className="explorer-tools">
       <label className="search-box"><Search size={16}/><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search navigation, motion, forms, FLIP…"/></label>
       <label className="select-wrap"><select value={category} onChange={(event) => setCategory(event.target.value as 'All' | PatternCategory)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -2067,7 +2376,7 @@ function InspirationView({ addReference }: { addReference: () => void }) {
   </>
 }
 
-function SpecView({ project, selectedPatterns, selectedCapabilities, similarity, markdown, agentPrompt, docsManifest, copy, updateProject, addSnapshot, setView }: { project: Project; selectedPatterns: Pattern[]; selectedCapabilities: Capability[]; similarity: ReturnType<typeof similarityReport>; markdown: string; agentPrompt: string; docsManifest: string; copy: (value: string, message?: string) => void; updateProject: (patch: Partial<Project>) => void; addSnapshot: () => void; setView: (view: View) => void }) {
+function SpecView({ project, selectedPatterns, selectedCapabilities, similarity, patternIntel, pageIntel, markdown, agentPrompt, blueprintReference, docsManifest, copy, updateProject, addSnapshot, setView }: { project: Project; selectedPatterns: Pattern[]; selectedCapabilities: Capability[]; similarity: ReturnType<typeof similarityReport>; patternIntel: PatternExplorerIntelligence; pageIntel: PageCompositionIntelligence; markdown: string; agentPrompt: string; blueprintReference: string; docsManifest: string; copy: (value: string, message?: string) => void; updateProject: (patch: Partial<Project>) => void; addSnapshot: () => void; setView: (view: View) => void }) {
   const selectedDocs = projectDocs.filter((doc) => project.docs.includes(doc.id))
   const config = normalizeProjectConfig(project.config)
   const readiness = configReadiness(config)
@@ -2076,18 +2385,27 @@ function SpecView({ project, selectedPatterns, selectedCapabilities, similarity,
   const roadmap = deriveImplementationRoadmap(config, project.coreFlows)
   const reviewSignals = configReviewSignals(config)
   const contextSignals = projectContextReviewSignals(project.context, config)
-  const visualSignals = visualReviewSignals(project.dna)
   const resolvedCapabilities = activeCapabilities(selectedCapabilities, config)
   const resolvedPatterns = activePatterns(selectedPatterns, config)
+  const contextDecisions = contextGapDecisions(project.context, config)
+  const visualSignals = visualReviewSignals(project.dna, resolvedPatterns, project.context)
+  const director = projectVisualDirector(project, config)
+  const approval = evaluateVisualApproval(project.approvedVisualContract, projectApprovalInput(project, patternIntel, selectedPatterns, config, director, pageIntel))
+  const approvedContractText = project.approvedVisualContract ? approvedVisualContractPrompt(project.approvedVisualContract) : ''
+  const setupIncompleteSignal = contextSignals.find((signal) => signal.id === 'context-recommended-setup-incomplete')
   const layerSignals = crossLayerSignals(selectedCapabilities, selectedPatterns, config)
   const contextEntries = projectContextEntries(project.context)
   const reviewCount = reviewSignals.length + contextSignals.length + visualSignals.length + layerSignals.length
   const { snapshots: _localCheckpoints, references: _localReferences, ...projectContract } = project
   const referenceContract = project.references.map(({ imageData: _imageData, imageAssetId: _imageAssetId, ...reference }) => reference)
   const jsonSpec = JSON.stringify({
-    version: 12,
-    blueprintVersion: '0.24.0',
-    intelligence: { readiness, reviewSignals, implementationRoadmap: roadmap, recommendationProvenance: configSettings.filter((setting) => settingIncludedInContract(setting, config)).map((setting) => ({ id: setting.id, label: setting.label, ...settingRecommendationProvenance(setting, config) })), projectContextReviewSignals: contextSignals, visualReviewSignals: visualSignals, crossLayerSignals: layerSignals, acceptanceCriteria: criteria, edgeCases: cases, appTypeMatches: appTypeMatches(config) },
+    version: 19,
+    blueprintVersion: '0.31.0',
+    visualApproval: { status: approval.status, label: approval.label, changedAreas: approval.changedAreas, contract: project.approvedVisualContract ?? null },
+    visualDirector: director,
+    patternExplorer: patternIntel,
+    pageComposition: pageIntel,
+    intelligence: { readiness, reviewSignals, scopeContract: compileScopeContract(config), scopeStateSummary: scopeStateSummary(config), scopeIntegrityDiagnostics: scopeIntegrityDiagnostics(config), implementationRoadmap: roadmap, recommendationProvenance: configSettings.filter((setting) => settingIncludedInContract(setting, config)).map((setting) => ({ id: setting.id, label: setting.label, ...settingRecommendationProvenance(setting, config) })), projectContextReviewSignals: contextSignals, contextGapDecisions: contextDecisions, visualReviewSignals: visualSignals, crossLayerSignals: layerSignals, acceptanceCriteria: criteria, edgeCases: cases, appTypeMatches: appTypeMatches(config) },
     project: { ...projectContract, config, selected: resolvedPatterns.map((pattern) => pattern.id), capabilities: resolvedCapabilities.map((capability) => capability.id), references: referenceContract },
     selectedPatterns: resolvedPatterns,
     selectedCapabilities: resolvedCapabilities,
@@ -2095,24 +2413,27 @@ function SpecView({ project, selectedPatterns, selectedCapabilities, similarity,
     selectedDocs: selectedDocs.map((doc) => ({ id: doc.id, filename: doc.filename, title: doc.title })),
   }, null, 2)
   return <>
-    <PageHeader eyebrow="Generated blueprint" title="One implementation brief, with proof of what ‘done’ means." copy="The human-facing summary stays compact. Exports still carry the full active setup contract, plus typed readiness signals, acceptance criteria, edge cases, the derived implementation roadmap, user-authored core flows, visual direction, capabilities, docs, and references." action={<button className="primary-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}><Copy size={16}/> Copy AI prompt</button>}/>
-    <div className="spec-toolbar"><button onClick={() => downloadText(`${slugify(project.name)}-project-spec.md`, markdown, 'text/markdown')}><FileText size={15}/> Project spec</button><button onClick={() => downloadText(`${slugify(project.name)}-docs-manifest.md`, docsManifest, 'text/markdown')}><FileText size={15}/> Docs manifest</button><button onClick={() => downloadText(`${slugify(project.name)}-blueprint.json`, jsonSpec, 'application/json')}><FileJson size={15}/> JSON</button><button onClick={addSnapshot}><Save size={15}/> Save checkpoint</button></div>
+    <PageHeader eyebrow="Generated blueprint" title="Compiled implementation brief, with the full Blueprint kept separate." copy="A fresh approved Visual Contract becomes the primary visual authority for implementation. Stale approval is surfaced and never silently reused; the exhaustive Blueprint remains available as an audit reference." action={<button className="primary-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}><Copy size={16}/> Copy AI prompt</button>}/>
+    <div className="spec-toolbar"><button onClick={() => downloadText(`${slugify(project.name)}-implementation.md`, markdown, 'text/markdown')}><FileText size={15}/> Implementation</button><button onClick={() => downloadText(`${slugify(project.name)}-blueprint-reference.md`, blueprintReference, 'text/markdown')}><FileText size={15}/> Blueprint reference</button><button onClick={() => downloadText(`${slugify(project.name)}-docs-manifest.md`, docsManifest, 'text/markdown')}><FileText size={15}/> Docs manifest</button><button onClick={() => downloadText(`${slugify(project.name)}-blueprint.json`, jsonSpec, 'application/json')}><FileJson size={15}/> JSON</button>{project.approvedVisualContract && <button onClick={() => downloadText(`${slugify(project.name)}-approved-visual-contract.md`, approvedContractText, 'text/markdown')}><Check size={15}/> Visual contract</button>}<button onClick={addSnapshot}><Save size={15}/> Save checkpoint</button></div>
     <div className="spec-layout"><section className="spec-sheet"><label className="spec-project"><span>Project name</span><input value={project.name} onChange={(event) => updateProject({ name: event.target.value })}/></label>
-      <div className="spec-section"><span className="spec-number">01</span><div><div className="eyebrow">App setup</div><h2>{config.appType}</h2><div className="spec-facts"><span>{config.profile} profile</span><span>{resolvedOperationalScale(config)} scale</span><span>{config.overrides.length + Object.keys(config.scopeChoices).length} deliberate choices</span><span>{configSettings.filter((setting) => settingIncludedInContract(setting, config)).length} active decisions</span></div>{(config.overrides.length || Object.keys(config.scopeChoices).length) ? <div className="spec-config-overrides">{Object.entries(config.scopeChoices).slice(0, 6).map(([id, choice]) => { const setting = configSettings.find((item) => item.id === id); return setting ? <div key={`scope-${id}`}><span>{setting.label}</span><strong>{choice}</strong></div> : null })}{config.overrides.slice(0, 12).map((id) => { const setting = configSettings.find((item) => item.id === id); return setting && settingIncludedInContract(setting, config) ? <div key={id}><span>{setting.label}</span><strong>{formatConfigValue(effectiveConfigValue(config, id))}</strong></div> : null })}</div> : <p className="spec-muted">Using Auto scope resolution with contextual behavioral and quality defaults.</p>}<button className="text-button" onClick={() => setView('setup')}>Review app setup <ArrowUpRight size={14}/></button></div></div>
-      <div className="spec-section"><span className="spec-number">02</span><div><div className="eyebrow">Readiness & proof</div><div className="spec-readiness"><div><strong>{readiness.label}</strong><span>{readiness.score}% coherence indicator</span><small>{readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''}` : readiness.important ? `${readiness.important} important` : reviewCount ? `${reviewCount} review signal${reviewCount > 1 ? 's' : ''}` : 'No review signals'}</small></div><div className="spec-proof-list"><strong>Acceptance criteria</strong>{criteria.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div><div className="spec-proof-list"><strong>Edge cases</strong>{cases.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div></div>{(reviewSignals.length > 0 || contextSignals.length > 0 || visualSignals.length > 0) && <div className="spec-review-signals">{reviewSignals.slice(0, 4).map((signal) => <p key={`${signal.id}-${signal.detail}`}><strong>{signal.severity.toUpperCase()} · {signal.category}</strong> — {signal.title}: {signal.detail}</p>)}{contextSignals.slice(0, 3).map((signal) => <p key={signal.id}><strong>Advisory:</strong> {signal.detail}</p>)}{visualSignals.slice(0, 4).map((signal) => <p key={signal}><strong>Visual:</strong> {signal}</p>)}</div>}</div></div>
-      <div className="spec-section"><span className="spec-number">03</span><div><div className="eyebrow">Project context · optional</div>{contextEntries.length ? <div className="spec-context-list">{contextEntries.map((entry) => <div key={entry.id}><span>{entry.label}</span><p>{entry.value}</p></div>)}</div> : <p className="spec-muted">No optional human briefing supplied. Structured Blueprint scope remains sufficient.</p>}<small className="spec-muted">Verbatim guidance only — this never changes App Setup automatically.</small></div></div>
+      <div className="spec-section"><span className="spec-number">01</span><div><div className="eyebrow">App setup</div><h2>{config.appType}</h2><div className="spec-facts"><span>{config.profile} profile</span><span>{resolvedOperationalScale(config)} scale</span><span>{config.overrides.length + Object.keys(config.scopeChoices).length} deliberate choices</span><span>{configSettings.filter((setting) => settingIncludedInContract(setting, config)).length} active decisions</span></div>{(config.overrides.length || Object.keys(config.scopeChoices).length) ? <div className="spec-config-overrides">{Object.entries(config.scopeChoices).slice(0, 6).map(([id, choice]) => { const setting = configSettings.find((item) => item.id === id); return setting ? <div key={`scope-${id}`}><span>{setting.label}</span><strong>{choice}</strong></div> : null })}{config.overrides.slice(0, 12).map((id) => { const setting = configSettings.find((item) => item.id === id); return setting && settingIncludedInContract(setting, config) ? <div key={id}><span>{setting.label}</span><strong>{formatConfigValue(effectiveConfigValue(config, id))}</strong></div> : null })}</div> : <p className="spec-muted">No explicit scope choices yet. Recommendations remain suggestions only; quality defaults apply only inside active scope.</p>}<button className="text-button" onClick={() => setView('setup')}>Review app setup <ArrowUpRight size={14}/></button></div></div>
+      <div className="spec-section"><span className="spec-number">02</span><div><div className="eyebrow">Readiness & proof</div><div className="spec-readiness"><div><strong>{setupIncompleteSignal ? 'Recommended setup incomplete' : readiness.label}</strong><span>{readiness.score}% coherence indicator</span><small>{setupIncompleteSignal ? 'Project intent is not fully represented by active scope' : readiness.blockers ? `${readiness.blockers} blocker${readiness.blockers > 1 ? 's' : ''}` : readiness.important ? `${readiness.important} important` : reviewCount ? `${reviewCount} review signal${reviewCount > 1 ? 's' : ''}` : 'No review signals'}</small></div><div className="spec-proof-list"><strong>Acceptance criteria</strong>{criteria.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div><div className="spec-proof-list"><strong>Edge cases</strong>{cases.slice(0, 5).map((item) => <p key={item}>{item}</p>)}</div></div>{(reviewSignals.length > 0 || contextSignals.length > 0 || visualSignals.length > 0) && <div className="spec-review-signals">{reviewSignals.slice(0, 4).map((signal) => <p key={`${signal.id}-${signal.detail}`}><strong>{signal.severity.toUpperCase()} · {signal.category}</strong> — {signal.title}: {signal.detail}</p>)}{contextSignals.slice(0, 3).map((signal) => <p key={signal.id}><strong>{signal.severity === 'important' ? 'IMPORTANT · scope' : 'Advisory'}:</strong> {signal.detail}</p>)}{visualSignals.slice(0, 4).map((signal) => <p key={signal}><strong>Visual:</strong> {signal}</p>)}</div>}</div></div>
+      <div className="spec-section"><span className="spec-number">03</span><div><div className="eyebrow">Project context · optional</div>{contextEntries.length ? <div className="spec-context-list">{contextEntries.map((entry) => <div key={entry.id}><span>{entry.label}</span><p>{entry.value}</p></div>)}</div> : <p className="spec-muted">No optional human briefing supplied. Structured Blueprint scope remains sufficient.</p>}<small className="spec-muted">Verbatim guidance only — this never changes App Setup automatically.</small>{contextDecisions.length > 0 && <div className="spec-review-signals">{contextDecisions.map((decision) => <p key={decision.id}><strong>{decision.status === 'applied' ? 'AI-FILLED GAP' : 'HELD FOR SCOPE'} · {decision.confidence}</strong> — {decision.decision} <em>Source: {decision.source}</em></p>)}</div>}</div></div>
       <div className="spec-section"><span className="spec-number">04</span><div><div className="eyebrow">Core flows · user-authored</div>{project.coreFlows.length ? <div className="spec-core-flows">{project.coreFlows.map((flow) => { const quality = coreFlowQuality(flow); return <article key={flow.id}><div><h3>{flow.title || 'Untitled flow'}</h3><span>{flow.actor || 'Actor not specified'} · {quality.complete ? 'Ready' : `${quality.score}% complete`}</span></div><p>{flow.goal || 'Goal not specified'} → <strong>{flow.successState || 'Success state not specified'}</strong></p><div className="spec-flow-path">{flow.steps.filter((step) => step.trim()).slice(0, 6).map((step, index) => <span key={`${flow.id}-${index}`}>{index + 1}. {step}</span>)}</div></article> })}</div> : <div className="spec-empty"><p>No user-authored workflow contract supplied. App Setup remains authoritative and implementation agents should not invent major workflow scope.</p><button className="text-button" onClick={() => setView('flows')}>Define core flows <ArrowUpRight size={14}/></button></div>}<button className="text-button" onClick={() => setView('flows')}>Review core flows <ArrowUpRight size={14}/></button></div></div>
       <div className="spec-section"><span className="spec-number">05</span><div><div className="eyebrow">Derived implementation roadmap</div><div className="spec-roadmap-list">{roadmap.phases.map((phase, index) => <article key={phase.id} className={phase.blocking ? 'blocking' : ''}><span>{String(index + 1).padStart(2, '0')}</span><div><div><h3>{phase.title}</h3><small>{phase.kind}{phase.blocking ? ' · blocking gate' : ''}</small></div><p>{phase.objective}</p><em>{phase.deliverables.length} deliverable{phase.deliverables.length === 1 ? '' : 's'} · {phase.proof.length} proof gate{phase.proof.length === 1 ? '' : 's'}</em></div></article>)}</div><p className="spec-muted">Derived automatically from resolved App Setup + Core Flows. It sequences work but never creates scope.</p><button className="text-button" onClick={() => setView('roadmap')}>Open implementation roadmap <ArrowUpRight size={14}/></button></div></div>
-      <div className="spec-section"><span className="spec-number">06</span><div><div className="eyebrow">Product direction</div><h2>{project.dna.personality}</h2><div className="spec-facts"><span>{project.dna.mobileFirst ? 'Mobile-first' : 'Responsive'}</span><span>{project.dna.easePriority} usability</span><span>{project.dna.stretch} creative stretch</span><span>{project.dna.typography}</span></div></div></div>
-      <div className="spec-section"><span className="spec-number">07</span><div><div className="eyebrow">Capabilities</div>{resolvedCapabilities.length ? <div className="spec-capability-list">{resolvedCapabilities.map((cap) => <span key={cap.id}>{cap.name}</span>)}</div> : <div className="spec-empty"><p>No compatible capabilities in resolved App Setup.</p><button className="text-button" onClick={() => setView('capabilities')}>Review product capabilities <ArrowUpRight size={14}/></button></div>}</div></div>
-      <div className="spec-section"><span className="spec-number">08</span><div><div className="eyebrow">Visual Studio</div><div className="spec-facts"><span>{project.dna.themeMode}</span><span>{project.dna.typographyCharacter}</span><span>{project.dna.sectionStrategy}</span><span>{project.dna.surfaceLanguage}</span><span>{project.dna.motionAmount} · {project.dna.motionCharacter}</span></div><div className="visual-dna-summary"><Metric name="Density" value={project.dna.density}/><Metric name="Icons" value={project.dna.iconWeight}/><Metric name="Surfaces" value={project.dna.cardWeight}/><Metric name="Corners" value={project.dna.radius}/><Metric name="Motion" value={project.dna.motion}/></div><div className="spec-colors">{Object.entries(project.dna.palette).slice(0, 8).map(([role, color]) => <span key={role} style={{ background: color }} title={`${role}: ${color}`}/>)}</div>{project.dna.visualAntiPatterns.length > 0 && <p className="spec-muted">Avoid: {project.dna.visualAntiPatterns.join(', ')}</p>}</div></div>
-      <div className="spec-section"><span className="spec-number">09</span><div className="spec-patterns"><div className="eyebrow">Selected visual patterns</div>{resolvedPatterns.length === 0 ? <div className="spec-empty"><p>No compatible visual patterns in resolved App Setup.</p><button className="text-button" onClick={() => setView('patterns')}>Review visual patterns <ArrowUpRight size={14}/></button></div> : resolvedPatterns.map((pattern) => <article key={pattern.id}><div><span>{pattern.category}</span><h3>{pattern.name}</h3></div><button onClick={() => copy(pattern.prompt, `${pattern.name} prompt copied`)}><Copy size={14}/></button><p>{pattern.prompt}</p></article>)}</div></div>
-      {layerSignals.length > 0 && <div className="spec-section"><span className="spec-number">10</span><div><div className="eyebrow">Cross-layer review</div><p className="spec-muted">Saved choices below are preserved but excluded from generated implementation direction because App Setup currently says they do not apply.</p><div className="spec-review-signals">{layerSignals.map((signal) => <p key={signal}>{signal}</p>)}</div></div></div>}
-      <div className="spec-section"><span className="spec-number">11</span><div><div className="eyebrow">MVP project docs</div><div className="spec-doc-list">{selectedDocs.length ? selectedDocs.map((doc) => <code key={doc.id}>{doc.filename}</code>) : <p className="spec-muted">No documentation files selected.</p>}</div><button className="text-button" onClick={() => setView('docs')}>Edit documentation checklist <ArrowUpRight size={14}/></button></div></div>
-      <div className="spec-section"><span className="spec-number">12</span><div><div className="eyebrow">References</div>{project.references.length ? <div className="spec-reference-list">{project.references.map((reference) => <div key={reference.id}><strong>{reference.title}</strong><span>{reference.focus.join(', ') || 'General direction'}</span><p>{reference.note}</p></div>)}</div> : <p className="spec-muted">No directional references saved.</p>}</div></div>
-      <div className="spec-section"><span className="spec-number">13</span><div><div className="eyebrow">Anti-sameness</div><p className="guardrail">{similarity.score === null ? 'No previous project is available for comparison yet.' : `This direction is ${similarity.score}% similar to “${similarity.project?.name}”. ${similarity.label}. Use this as a prompt to reconsider repeated visual habits—not as a hard rule.`}</p></div></div>
-      <div className="spec-section last"><span className="spec-number">14</span><div><div className="eyebrow">Guardrail</div><p className="guardrail">App Setup is the source of truth for product scope. Explicit scope and resolved required/inferred dependencies outrank everything else. Core Flows are explicit workflow intent only inside resolved scope and never activate excluded capabilities. The Derived Implementation Roadmap sequences that resolved work but never creates or overrides scope. Optional Project Context is verbatim human guidance only and never changes scope automatically. Capabilities and visual patterns are applied only when compatible with resolved App Setup; excluded saved selections are not requirements. Recommended behavior/quality defaults apply only inside active scope. Preserve usability, responsiveness, accessibility, data integrity, and the actual workflow; references remain directional only.</p></div></div>
-    </section><aside className="spec-aside"><div className="aside-card"><Sparkles size={18}/><strong>AI implementation prompt</strong><p>Includes the full contract, derived roadmap, acceptance criteria, edge cases, and review signals.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy prompt <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Project spec</strong><p>Human-first summary with exhaustive setup contract kept as an appendix.</p><button className="text-button" onClick={() => copy(markdown, 'Markdown copied')}>Copy Markdown <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Docs manifest</strong><p>Exact selected Markdown files with purpose and suggested sections.</p><button className="text-button" onClick={() => copy(docsManifest, 'Docs manifest copied')}>Copy manifest <Copy size={13}/></button></div><div className="aside-card"><Settings2 size={18}/><strong>Structured JSON</strong><p>Portable contract plus roadmap, readiness, acceptance criteria, edge cases, and app-type fit.</p><button className="text-button" onClick={() => copy(jsonSpec, 'JSON copied')}>Copy JSON <Copy size={13}/></button></div></aside></div>
+      <div className="spec-section"><span className="spec-number">06</span><div><div className="eyebrow">Visual Director · synthesized</div><h2>{director.directionName}</h2><p>{director.thesis}</p><div className="spec-facts"><span>{director.designDNA.archetype}</span><span>{director.designDNA.visualTension}</span><span>{director.visualOriginality} originality</span><span>{director.designAutonomy} autonomy</span></div><div className="spec-review-signals"><p><strong>Signature:</strong> {director.signatureElement}</p><p><strong>Typography:</strong> {director.typographyDirection}</p><p><strong>Media:</strong> {director.mediaDirection}</p></div><small className="spec-muted">Visual synthesis only — this cannot activate optional functional scope.</small></div></div>
+      <div className="spec-section"><span className="spec-number">07</span><div><div className="eyebrow">Pattern Explorer 2.0</div><h2>{patternIntel.recommendations[0]?.name || director.directionName}</h2><p>{patternIntel.recommendations[0]?.whyItFits}</p><div className="spec-facts"><span>{patternIntel.antiHomogeneity.level} similarity risk</span>{patternIntel.antiHomogeneity.similarity !== null && <span>{patternIntel.antiHomogeneity.similarity}% closest-match similarity</span>}<span>{patternIntel.recommendations[0]?.originality}</span></div><div className="spec-review-signals">{patternIntel.antiHomogeneity.diversification.map((item)=><p key={item}>{item}</p>)}</div><small className="spec-muted">Pattern recommendations are visual guidance only; bundled patterns require explicit application and never authorize functional scope.</small></div></div>
+      <div className="spec-section"><span className="spec-number">08</span><div><div className="eyebrow">Page Composition Intelligence · v0.29</div><h2>{pageIntel.pages[0]?.name || "Primary page"}</h2><p>{pageIntel.pages[0]?.purpose}</p><div className="spec-facts"><span>{pageIntel.pages.length} major page model{pageIntel.pages.length === 1 ? "" : "s"}</span><span>{pageIntel.visualQualityReview.status} visual review</span><span>{pageIntel.pages.filter((page) => page.scopeState === "implementation").length} implementation-ready</span></div><div className="spec-review-signals">{pageIntel.pages.slice(0,3).map((page)=><p key={page.id}><strong>{page.name}:</strong> {page.visualAnchor} <em>({page.scopeState})</em></p>)}</div><p className="spec-muted"><strong>Mobile:</strong> {pageIntel.responsiveRules[0]}</p><p className="spec-muted"><strong>Quality contract:</strong> {pageIntel.frontendQualityContract.criteria[0]}</p><small className="spec-muted">Composition proposals are visual guidance only. Advisory pages cannot activate inactive functional scope.</small></div></div>
+      <div className={`spec-section visual-approval-spec ${approval.status}`}><span className="spec-number">09</span><div><div className="eyebrow">Visual approval</div><h2>{approval.label}</h2><p>{approval.detail}</p>{approval.status === 'approved' && approval.contract && <div className="spec-review-signals"><p><strong>Approved direction:</strong> {approval.contract.direction.name}</p><p><strong>Provenance:</strong> {approval.contract.provenance} · {new Date(approval.contract.approvedAt).toLocaleString()}</p><p><strong>Compiler:</strong> This Visual Contract is the primary visual implementation authority.</p></div>}{approval.status === 'stale' && <div className="spec-review-signals"><p><strong>Re-approval required.</strong> Previous approval is audit history only.</p>{approval.changedAreas.map((area) => <p key={area}>Changed: {area}</p>)}</div>}{approval.status === 'unapproved' && <p className="spec-muted">The compiler uses current visual synthesis as provisional guidance until you explicitly approve a direction.</p>}<div className="checkpoint-actions"><button className="text-button" onClick={() => setView('preview')}>{approval.status === 'stale' ? 'Review and re-approve' : approval.status === 'approved' ? 'Review approved preview' : 'Approve in Preview Studio'} <ArrowUpRight size={14}/></button>{approvedContractText && <button className="text-button" onClick={() => copy(approvedContractText, 'Approved Visual Contract copied')}>Copy Visual Contract <Copy size={13}/></button>}</div><small className="spec-muted">Approval is visual/presentational authority only. It never activates optional functional scope.</small></div></div>
+      <div className="spec-section"><span className="spec-number">10</span><div><div className="eyebrow">Capabilities</div>{resolvedCapabilities.length ? <div className="spec-capability-list">{resolvedCapabilities.map((cap) => <span key={cap.id}>{cap.name}</span>)}</div> : <div className="spec-empty"><p>No compatible capabilities in resolved App Setup.</p><button className="text-button" onClick={() => setView('capabilities')}>Review product capabilities <ArrowUpRight size={14}/></button></div>}</div></div>
+      <div className="spec-section"><span className="spec-number">11</span><div><div className="eyebrow">Visual Studio</div><div className="spec-facts"><span>{project.dna.themeMode}</span><span>{project.dna.typographyCharacter}</span><span>{project.dna.sectionStrategy}</span><span>{project.dna.surfaceLanguage}</span><span>{project.dna.motionAmount} · {project.dna.motionCharacter}</span></div><div className="visual-dna-summary"><Metric name="Density" value={project.dna.density}/><Metric name="Icons" value={project.dna.iconWeight}/><Metric name="Surfaces" value={project.dna.cardWeight}/><Metric name="Corners" value={project.dna.radius}/><Metric name="Motion" value={project.dna.motion}/></div><div className="spec-colors">{Object.entries(project.dna.palette).slice(0, 8).map(([role, color]) => <span key={role} style={{ background: color }} title={`${role}: ${color}`}/>)}</div>{project.dna.visualAntiPatterns.length > 0 && <p className="spec-muted">Avoid: {project.dna.visualAntiPatterns.join(', ')}</p>}</div></div>
+      <div className="spec-section"><span className="spec-number">12</span><div className="spec-patterns"><div className="eyebrow">Selected visual patterns</div>{resolvedPatterns.length === 0 ? <div className="spec-empty"><p>No compatible visual patterns in resolved App Setup.</p><button className="text-button" onClick={() => setView('patterns')}>Review visual patterns <ArrowUpRight size={14}/></button></div> : resolvedPatterns.map((pattern) => <article key={pattern.id}><div><span>{pattern.category}</span><h3>{pattern.name}</h3></div><button onClick={() => copy(pattern.prompt, `${pattern.name} prompt copied`)}><Copy size={14}/></button><p>{pattern.prompt}</p></article>)}</div></div>
+      {layerSignals.length > 0 && <div className="spec-section"><span className="spec-number">13</span><div><div className="eyebrow">Cross-layer review</div><p className="spec-muted">Saved choices below are preserved but excluded from generated implementation direction because App Setup currently says they do not apply.</p><div className="spec-review-signals">{layerSignals.map((signal) => <p key={signal}>{signal}</p>)}</div></div></div>}
+      <div className="spec-section"><span className="spec-number">14</span><div><div className="eyebrow">MVP project docs</div><div className="spec-doc-list">{selectedDocs.length ? selectedDocs.map((doc) => <code key={doc.id}>{doc.filename}</code>) : <p className="spec-muted">No documentation files selected.</p>}</div><button className="text-button" onClick={() => setView('docs')}>Edit documentation checklist <ArrowUpRight size={14}/></button></div></div>
+      <div className="spec-section"><span className="spec-number">15</span><div><div className="eyebrow">References</div>{project.references.length ? <div className="spec-reference-list">{project.references.map((reference) => <div key={reference.id}><strong>{reference.title}</strong><span>{reference.focus.join(', ') || 'General direction'}</span><p>{reference.note}</p></div>)}</div> : <p className="spec-muted">No directional references saved.</p>}</div></div>
+      <div className="spec-section"><span className="spec-number">16</span><div><div className="eyebrow">Anti-homogeneity review</div><p className="guardrail">{patternIntel.antiHomogeneity.summary} {patternIntel.antiHomogeneity.repeatedTraits.length ? `Repeated traits: ${patternIntel.antiHomogeneity.repeatedTraits.join('; ')}.` : 'No dominant repeated traits detected yet.'}</p></div></div>
+      <div className="spec-section last"><span className="spec-number">17</span><div><div className="eyebrow">Guardrail</div><p className="guardrail">App Setup is the source of truth for product scope. Explicit scope and true required dependencies outrank everything else. A fresh Approved Visual Contract is authoritative only for visual/presentational implementation; stale approval is audit history until re-approved. Suggested scope is never implementation scope. Core Flows are explicit workflow intent only inside resolved scope and never activate excluded capabilities. The Derived Implementation Roadmap sequences that resolved work but never creates or overrides scope. Optional Project Context is verbatim human guidance only and never changes scope automatically. Capabilities and visual patterns are applied only when compatible with resolved App Setup; excluded saved selections are not requirements. Recommended behavior/quality defaults apply only inside active scope. Preserve usability, responsiveness, accessibility, data integrity, and the actual workflow; references remain directional only.</p></div></div>
+    </section><aside className="spec-aside"><div className="aside-card"><Sparkles size={18}/><strong>AI implementation prompt</strong><p>Compiled execution contract: scope authority, material decisions, roadmap, proof, and review signals.</p><button className="text-button" onClick={() => copy(agentPrompt, 'Agent prompt copied')}>Copy prompt <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Implementation contract</strong><p>Human-first compiled brief without the exhaustive resolved-setting dump.</p><button className="text-button" onClick={() => copy(markdown, 'Implementation contract copied')}>Copy contract <Copy size={13}/></button></div>{project.approvedVisualContract && <div className="aside-card"><Check size={18}/><strong>Approved Visual Contract</strong><p>{approval.status === 'approved' ? 'Fresh visual authority used by the compiler.' : 'Saved approval snapshot is stale and preserved only for audit until re-approved.'}</p><button className="text-button" onClick={() => copy(approvedContractText, 'Approved Visual Contract copied')}>Copy visual contract <Copy size={13}/></button></div>}<div className="aside-card"><FileText size={18}/><strong>Blueprint reference</strong><p>Exhaustive resolved settings for audit, debugging, and targeted lookup—not the primary coding prompt.</p><button className="text-button" onClick={() => copy(blueprintReference, 'Blueprint reference copied')}>Copy reference <Copy size={13}/></button></div><div className="aside-card"><FileText size={18}/><strong>Docs manifest</strong><p>Exact selected Markdown files with purpose and suggested sections.</p><button className="text-button" onClick={() => copy(docsManifest, 'Docs manifest copied')}>Copy manifest <Copy size={13}/></button></div><div className="aside-card"><Settings2 size={18}/><strong>Structured JSON</strong><p>Portable contract plus roadmap, readiness, acceptance criteria, edge cases, and app-type fit.</p><button className="text-button" onClick={() => copy(jsonSpec, 'JSON copied')}>Copy JSON <Copy size={13}/></button></div></aside></div>
   </>
 }
 

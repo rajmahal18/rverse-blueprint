@@ -7,6 +7,14 @@ export type ShapeLanguage = 'Sharp' | 'Soft' | 'Rounded' | 'Pill-accented'
 export type ImageryMode = 'None' | 'Photography' | 'Product screenshots' | 'Illustration' | 'Abstract graphics' | 'Mixed'
 export type MotionAmount = 'None' | 'Low' | 'Moderate' | 'High'
 export type MotionCharacter = 'Snappy' | 'Smooth' | 'Springy' | 'Editorial' | 'Cinematic'
+export type FontWeightPreference = 'Auto / Recommended' | 'Light' | 'Regular' | 'Medium' | 'Semibold' | 'Bold' | 'Extra Bold' | 'Black' | 'Custom'
+export type WeightContrast = 'Subtle' | 'Balanced' | 'Strong'
+export type DesignAutonomy = 'Strict' | 'Balanced' | 'Art Director'
+export type VisualOriginality = 'Safe' | 'Distinct' | 'Bold' | 'Experimental'
+export type SignatureStrength = 'None' | 'Subtle' | 'Recommended' | 'Strong'
+export type NavigationVariant = 'Auto / Recommended' | 'Top bar' | 'Compact header' | 'Sidebar' | 'Bottom dock'
+export type VisualAuthority = 'hard' | 'direction' | 'freedom'
+export type VisualDecisionSource = 'explicit_user_selection' | 'visual_director' | 'context_completion' | 'pattern_bundle' | 'design_baseline' | 'approved_preview'
 
 export type PaletteRoles = {
   ink: string
@@ -38,6 +46,9 @@ export type Dna = {
   mobileFirst: boolean
   easePriority: 'Standard' | 'High' | 'Non-negotiable'
   stretch: 'Safe' | 'Balanced' | 'Push me'
+  designAutonomy: DesignAutonomy
+  visualOriginality: VisualOriginality
+  signatureStrength: SignatureStrength
 
   themeMode: ThemeMode
   defaultTheme: 'Light' | 'Dark'
@@ -55,6 +66,11 @@ export type Dna = {
   headingScale: number
   headingWeight: number
   bodyWeight: number
+  uiWeight: number
+  headingWeightPreference: FontWeightPreference
+  bodyWeightPreference: FontWeightPreference
+  uiWeightPreference: FontWeightPreference
+  weightContrast: WeightContrast
   lineHeight: number
   letterSpacing: number
   textMeasure: number
@@ -67,6 +83,7 @@ export type Dna = {
   alignmentTendency: 'Mostly left' | 'Centered moments' | 'Mixed' | 'Deliberately asymmetric'
   responsiveBehavior: 'Reflow naturally' | 'Collapse aggressively' | 'Preserve density' | 'Mobile composition changes'
   functionalDensity: 'Follow global' | 'Balanced for scanning' | 'Compact operational'
+  navigationVariant: NavigationVariant
 
   sectionStrategy: SectionStrategy
   sectionContrast: number
@@ -136,11 +153,11 @@ const extendPalette = (palette: Partial<PaletteRoles>): PaletteRoles => ({
 
 export const defaultDna: Dna = {
   personality: 'Premium / Practical', density: 42, iconWeight: 58, cardWeight: 34, radius: 26, motion: 28,
-  typography: 'Neo-grotesk + humanist body', palette: extendPalette({}), mobileFirst: true, easePriority: 'Non-negotiable', stretch: 'Balanced',
+  typography: 'Neo-grotesk + humanist body', palette: extendPalette({}), mobileFirst: true, easePriority: 'Non-negotiable', stretch: 'Balanced', designAutonomy: 'Balanced', visualOriginality: 'Distinct', signatureStrength: 'Recommended',
   themeMode: 'Light + Dark toggle', defaultTheme: 'Light', respectOsPreference: true, rememberThemePreference: true, themeTogglePlacement: 'Header + settings', darkPaletteStrategy: 'Auto-adapted',
   darkPalette: extendPalette({ ink: '#f4f4f1', background: '#111317', accent: '#91a2ff', accentForeground: '#111317', accentHover: '#a8b5ff', accentActive: '#bac4ff', surface: '#1d2025', muted: '#9a9da4', positive: '#73a982', destructive: '#ef8275', warning: '#d9a24c', informational: '#75a8d4', border: '#353941', focus: '#a9b4ff', disabled: '#666b73' }),
-  typographyCharacter: 'Neo-grotesk', headingTypography: 'Neo-grotesk', bodyTypography: 'Humanist sans', monospaceUsage: 'Metadata only', bodyFontSize: 16, headingScale: 110, headingWeight: 700, bodyWeight: 450, lineHeight: 155, letterSpacing: -1, textMeasure: 68,
-  contentMaxWidth: 1200, pageGutters: 40, sectionSpacing: 88, whitespacePriority: 'Generous', gridCharacter: 'Flexible grid', alignmentTendency: 'Mostly left', responsiveBehavior: 'Mobile composition changes', functionalDensity: 'Balanced for scanning',
+  typographyCharacter: 'Neo-grotesk', headingTypography: 'Neo-grotesk', bodyTypography: 'Humanist sans', monospaceUsage: 'Metadata only', bodyFontSize: 16, headingScale: 110, headingWeight: 700, bodyWeight: 450, uiWeight: 600, headingWeightPreference: 'Auto / Recommended', bodyWeightPreference: 'Auto / Recommended', uiWeightPreference: 'Auto / Recommended', weightContrast: 'Balanced', lineHeight: 155, letterSpacing: -1, textMeasure: 68,
+  contentMaxWidth: 1200, pageGutters: 40, sectionSpacing: 88, whitespacePriority: 'Generous', gridCharacter: 'Flexible grid', alignmentTendency: 'Mostly left', responsiveBehavior: 'Mobile composition changes', functionalDensity: 'Balanced for scanning', navigationVariant: 'Auto / Recommended',
   sectionStrategy: 'Alternating subtle sections', sectionContrast: 28, backgroundTreatment: 'Tint', sectionDividers: 'Whitespace only', heroSeparation: 'Subtle contrast', ctaTreatment: 'Contrast band', footerContrast: 'Strong', variedSections: true,
   surfaceLanguage: 'Hairline borders', borderWeight: 1, shadowCharacter: 'Barely there', elevation: 12, surfaceContrast: 24, gradientUsage: 'None', glassUsage: 'None', textureUsage: 'None',
   shapeLanguage: 'Soft', surfaceRadius: 12, controlRadius: 9, buttonRadius: 9, pillUsage: 'Tags only',
@@ -243,6 +260,19 @@ const clamp = (value: unknown, min: number, max: number, fallback: number) => {
   return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback
 }
 
+export function semanticFontWeight(preference: FontWeightPreference, fallback: number): number {
+  const weights: Partial<Record<FontWeightPreference, number>> = { Light: 300, Regular: 400, Medium: 500, Semibold: 600, Bold: 700, 'Extra Bold': 800, Black: 900 }
+  return weights[preference] ?? fallback
+}
+
+export function recommendedTypographyWeights(dna: Pick<Dna, 'headingTypography' | 'weightContrast'>): { headingWeight: number; bodyWeight: number; uiWeight: number } {
+  const editorial = dna.headingTypography.includes('serif')
+  const expressive = dna.headingTypography === 'Display / expressive'
+  const baseHeading = expressive ? 800 : editorial ? 600 : 700
+  const delta = dna.weightContrast === 'Strong' ? 100 : dna.weightContrast === 'Subtle' ? -50 : 0
+  return { headingWeight: Math.min(900, Math.max(300, baseHeading + delta)), bodyWeight: dna.weightContrast === 'Subtle' ? 450 : 400, uiWeight: dna.weightContrast === 'Strong' ? 650 : 600 }
+}
+
 export const normalizeDna = (value: (Partial<Dna> & { palette?: Partial<PaletteRoles> | string[]; darkPalette?: Partial<PaletteRoles> }) | null | undefined): Dna => {
   if (!value) return structuredClone(defaultDna)
   const oldPalette = Array.isArray(value.palette) ? value.palette : null
@@ -257,6 +287,9 @@ export const normalizeDna = (value: (Partial<Dna> & { palette?: Partial<PaletteR
     typography: value.typography || `${inferredType}${inferredType.includes('serif') || inferredType === 'Display / expressive' ? ' + utility sans' : ''}`,
     visualAntiPatterns: Array.isArray(value.visualAntiPatterns) ? value.visualAntiPatterns.filter(Boolean) : [...defaultDna.visualAntiPatterns],
   }
+  if (!['Strict', 'Balanced', 'Art Director'].includes(String(normalized.designAutonomy))) normalized.designAutonomy = defaultDna.designAutonomy
+  if (!['Safe', 'Distinct', 'Bold', 'Experimental'].includes(String(normalized.visualOriginality))) normalized.visualOriginality = defaultDna.visualOriginality
+  if (!['None', 'Subtle', 'Recommended', 'Strong'].includes(String(normalized.signatureStrength))) normalized.signatureStrength = defaultDna.signatureStrength
   normalized.density = clamp(normalized.density, 0, 100, defaultDna.density)
   normalized.iconWeight = clamp(normalized.iconWeight, 0, 100, defaultDna.iconWeight)
   normalized.cardWeight = clamp(normalized.cardWeight, 0, 100, defaultDna.cardWeight)
@@ -266,6 +299,12 @@ export const normalizeDna = (value: (Partial<Dna> & { palette?: Partial<PaletteR
   normalized.headingScale = clamp(normalized.headingScale, 75, 160, defaultDna.headingScale)
   normalized.headingWeight = clamp(normalized.headingWeight, 300, 900, defaultDna.headingWeight)
   normalized.bodyWeight = clamp(normalized.bodyWeight, 300, 700, defaultDna.bodyWeight)
+  normalized.uiWeight = clamp(normalized.uiWeight, 300, 700, defaultDna.uiWeight)
+  const weightPreferences = ['Auto / Recommended', 'Light', 'Regular', 'Medium', 'Semibold', 'Bold', 'Extra Bold', 'Black', 'Custom']
+  if (!weightPreferences.includes(String(normalized.headingWeightPreference))) normalized.headingWeightPreference = defaultDna.headingWeightPreference
+  if (!weightPreferences.includes(String(normalized.bodyWeightPreference))) normalized.bodyWeightPreference = defaultDna.bodyWeightPreference
+  if (!weightPreferences.includes(String(normalized.uiWeightPreference))) normalized.uiWeightPreference = defaultDna.uiWeightPreference
+  if (!['Subtle', 'Balanced', 'Strong'].includes(String(normalized.weightContrast))) normalized.weightContrast = defaultDna.weightContrast
   normalized.lineHeight = clamp(normalized.lineHeight, 120, 190, defaultDna.lineHeight)
   normalized.letterSpacing = clamp(normalized.letterSpacing, -4, 8, defaultDna.letterSpacing)
   normalized.textMeasure = clamp(normalized.textMeasure, 42, 90, defaultDna.textMeasure)
@@ -273,6 +312,7 @@ export const normalizeDna = (value: (Partial<Dna> & { palette?: Partial<PaletteR
   normalized.pageGutters = clamp(normalized.pageGutters, 12, 96, defaultDna.pageGutters)
   normalized.sectionSpacing = clamp(normalized.sectionSpacing, 32, 180, defaultDna.sectionSpacing)
   if (!['Follow global', 'Balanced for scanning', 'Compact operational'].includes(String(normalized.functionalDensity))) normalized.functionalDensity = defaultDna.functionalDensity
+  if (!['Auto / Recommended', 'Top bar', 'Compact header', 'Sidebar', 'Bottom dock'].includes(String(normalized.navigationVariant))) normalized.navigationVariant = defaultDna.navigationVariant
   normalized.sectionContrast = clamp(normalized.sectionContrast, 0, 100, defaultDna.sectionContrast)
   normalized.borderWeight = clamp(normalized.borderWeight, 0, 4, defaultDna.borderWeight)
   normalized.elevation = clamp(normalized.elevation, 0, 100, defaultDna.elevation)
@@ -303,9 +343,10 @@ export function visualDnaContract(dna: Dna, prompt = false) {
   const line = (label: string, value: string | number | boolean) => `- ${label}: ${typeof value === 'boolean' ? (value ? 'Yes' : 'No') : value}`
   const paletteLines = (palette: PaletteRoles) => Object.entries(palette).map(([role, color]) => `  - ${role}: ${color}`).join('\n')
   const sections: [string, (string | null)[]][] = [
+    ['Visual direction',[line('Design autonomy',dna.designAutonomy),line('Visual originality',dna.visualOriginality),line('Signature element strength',dna.signatureStrength),line('Ease-of-use priority',dna.easePriority),line('Creative stretch',dna.stretch)]],
     ['Theme',[line('Mode',dna.themeMode),line('Default theme',dna.defaultTheme),line('Respect OS preference',dna.respectOsPreference),line('Remember preference',dna.rememberThemePreference),line('Toggle placement',dna.themeTogglePlacement),line('Dark palette strategy',dna.darkPaletteStrategy),'- Light palette roles:\n'+paletteLines(dna.palette),dna.themeMode==='Light only'?null:dna.darkPaletteStrategy==='Separately curated'?'- Dark palette roles (separately curated):\n'+paletteLines(dna.darkPalette):'- Dark palette roles: Auto-adapt from the light semantic roles while preserving contrast and role meaning']],
-    ['Typography',[line('Overall character',dna.typographyCharacter),line('Heading character',dna.headingTypography),line('Body character',dna.bodyTypography),line('Monospace usage',dna.monospaceUsage),line('Body size',`${dna.bodyFontSize}px`),line('Heading scale',`${dna.headingScale}%`),line('Heading weight',dna.headingWeight),line('Body weight',dna.bodyWeight),line('Line height',(dna.lineHeight/100).toFixed(2)),line('Tracking',`${dna.letterSpacing/100}em`),line('Readable text measure',`${dna.textMeasure}ch`)]],
-    ['Layout & spacing',[line('Information density',`${dna.density}/100`),line('Content max width',`${dna.contentMaxWidth}px`),line('Page gutters',`${dna.pageGutters}px`),line('Section spacing',`${dna.sectionSpacing}px`),line('Whitespace priority',dna.whitespacePriority),line('Grid character',dna.gridCharacter),line('Alignment tendency',dna.alignmentTendency),line('Responsive behavior',dna.responsiveBehavior),line('Catalog / working-surface density',dna.functionalDensity),line('Mobile-first',dna.mobileFirst)]],
+    ['Typography',[line('Overall character',dna.typographyCharacter),line('Heading character',dna.headingTypography),line('Body character',dna.bodyTypography),line('Monospace usage',dna.monospaceUsage),line('Body size',`${dna.bodyFontSize}px`),line('Heading scale',`${dna.headingScale}%`),line('Heading weight',`${dna.headingWeight} · ${dna.headingWeightPreference}`),line('Body weight',`${dna.bodyWeight} · ${dna.bodyWeightPreference}`),line('UI / control weight',`${dna.uiWeight} · ${dna.uiWeightPreference}`),line('Weight contrast',dna.weightContrast),line('Line height',(dna.lineHeight/100).toFixed(2)),line('Tracking',`${dna.letterSpacing/100}em`),line('Readable text measure',`${dna.textMeasure}ch`)]],
+    ['Layout & spacing',[line('Information density',`${dna.density}/100`),line('Content max width',`${dna.contentMaxWidth}px`),line('Page gutters',`${dna.pageGutters}px`),line('Section spacing',`${dna.sectionSpacing}px`),line('Whitespace priority',dna.whitespacePriority),line('Grid character',dna.gridCharacter),line('Alignment tendency',dna.alignmentTendency),line('Responsive behavior',dna.responsiveBehavior),line('Catalog / working-surface density',dna.functionalDensity),line('Navigation variant',dna.navigationVariant),line('Mobile-first',dna.mobileFirst)]],
     ['Sections & backgrounds',[line('Section strategy',dna.sectionStrategy),line('Section contrast',`${dna.sectionContrast}/100`),line('Background treatment',dna.backgroundTreatment),line('Section dividers',dna.sectionDividers),line('Hero separation',dna.heroSeparation),line('CTA treatment',dna.ctaTreatment),line('Footer contrast',dna.footerContrast),line('Intentional section variation',dna.variedSections)]],
     ['Surfaces & containment',[line('Surface language',dna.surfaceLanguage),line('Border weight',`${dna.borderWeight}px`),line('Shadow character',dna.shadowCharacter),line('Elevation',`${dna.elevation}/100`),line('Surface contrast',`${dna.surfaceContrast}/100`),line('Gradient usage',dna.gradientUsage),line('Glass usage',dna.glassUsage),line('Texture usage',dna.textureUsage)]],
     ['Shape & controls',[line('Shape language',dna.shapeLanguage),line('Surface radius',`${dna.surfaceRadius}px`),line('Control radius',`${dna.controlRadius}px`),line('Button radius',`${dna.buttonRadius}px`),line('Pill usage',dna.pillUsage),line('Button shape',dna.buttonShape),line('Button weight',dna.buttonWeight),line('Button emphasis',dna.buttonEmphasis),line('Input appearance',dna.inputAppearance),line('Input height',`${dna.inputHeight}px`),line('Form density',dna.formDensity),line('Control border style',dna.controlBorderStyle),line('Hover / active character',dna.hoverCharacter)]],

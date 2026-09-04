@@ -1,4 +1,4 @@
-# Blueprint — Reusable Product Architecture (v0.24)
+# Blueprint — Interactive Approval + Visual Contract (v0.31)
 
 Blueprint is a local-first **application specification + visual direction workspace**. It makes product behavior, engineering expectations, and visual intent explicit before coding—without turning planning into another tedious questionnaire.
 
@@ -6,17 +6,135 @@ Blueprint is a local-first **application specification + visual direction worksp
 
 **Usability comes first.** A new workspace is already valid. Recommended defaults are applied automatically, irrelevant settings stay hidden, advanced controls stay out of the way until needed, and the normal workflow is to configure exceptions—not answer hundreds of questions.
 
+## v0.31 — Interactive Approval + Visual Contract Integration
+
+v0.31 completes the six-phase Visual Intelligence program and closes the design-to-implementation loop:
+
+**Describe → Recommend → Preview → Refine → Approve → Compile → Build**
+
+Key behavior:
+
+- **Explicit visual approval:** Preview Studio now distinguishes mutable **Save refinement to Blueprint** from **Approve for implementation**. Approval records provenance `approved_preview`.
+- **Stable Approved Visual Contract:** approval snapshots the selected direction, Visual Thesis, Design DNA, page compositions, typography, color behavior, imagery/media, motion, hard constraints, signature element/placement, responsive rules, product-relevant interaction states, copy direction, Frontend Quality Contract, and anti-homogeneity diagnostic.
+- **Deterministic freshness:** material edits to Visual DNA, compatible pattern selections, Visual Director synthesis/hard constraints, page composition, project context, scope/media/copy direction mark the saved approval **STALE**. Device/page/interaction tabs do not.
+- **No silent contract drift:** a stale approved snapshot remains available for audit/history but is explicitly removed from current compiler authority until re-approved.
+- **Compiler authority integration:** a fresh Approved Visual Contract becomes the primary visual source in the implementation prompt. Raw/current visual details stay in `BLUEPRINT_REFERENCE.md` for audit/debugging rather than competing with the approved direction.
+- **Interactive approval proof:** Preview Studio includes domain-relevant states such as selected booking slots, selected clinic/workforce rows, selected/live sports matches, active navigation, pressed CTA, project hover/focus, and unavailable-slot treatment.
+- **Anti-homogeneity at approval:** similarity risk and repeated-trait diagnostics are snapshotted and surfaced before/at approval without automatically blocking contextually legitimate similarity.
+- **Scope wall preserved:** approval, previews, page proposals, Visual Director, and Pattern Explorer remain visual/presentational authority only. They cannot activate Portfolio, Commerce, Payments, Booking, Admin, or other optional functional scope.
+- **Canonical benchmark contracts stay distinct:** ADW, Clinic, HRMS, Booking, Sports, and Portfolio all reach materially different Approved Visual Contracts.
+- **Latent Preview Studio domain-key bug fixed:** Page Composition now exports stable Visual Director domain IDs to the preview renderer, ensuring canonical domain-specific surfaces are actually selected rather than falling through to the generic preview.
+
+Structured JSON is **v19**; package/Blueprint metadata are `0.31.0`; backup schema is **v14** because Approved Visual Contracts are now persisted. Imports remain compatible with v2–v14. `npm test` covers **196 named regression checks**.
+
+Validation in the release workspace: full regression chain **196/196**, dedicated v0.31 suite **18/18**, and **25 TS/TSX source files** pass syntax/transpile diagnostics. Dependency-backed React/Vite typecheck/build still requires installed npm dependencies.
+
+## v0.29 — Page Composition Intelligence + Visual Quality Review
+
+v0.29 turns the approved project-level visual direction into first-class page composition. Blueprint now derives domain-aware major-page models with purpose, visual anchor, section hierarchy, CTA/imagery strategy, density, primary interaction, explicit mobile recomposition, signature-element placement, qualitative anti-AI-slop review, and a Frontend Quality Contract.
+
+The canonical benchmarks intentionally use different page grammar: automotive storefront/product/location, clinic queue/patient timeline, government workforce/personnel records, availability-first booking, live sports/score hierarchy, and authored portfolio/case-study storytelling. Generated pages may be marked **advisory** when their supporting functional scope is inactive; page planning never turns a suggested module On.
+
+Structured JSON is v17; package/Blueprint metadata are `0.29.0`; backup schema remains v12 because the new intelligence is derived rather than persisted. `npm test` now covers **162 named regression checks**.
+
 ## Final architecture
 
-1. **App Setup** — 935 schema-driven product/engineering decisions across 50 possible sections, including reusable-product / tenant architecture
+1. **App Setup** — 940 schema-driven product/engineering decisions across 52 possible sections, including reusable-product / tenant architecture, context-gap posture, and media assistance
 2. **Project Context** — optional verbatim human briefing for the coding AI; never auto-mutates configuration
 3. **Core Flows** — optional user-authored actor journeys with main path, success state, and failure/recovery behavior; never auto-creates product scope
 4. **Implementation Roadmap** — deterministic sequencing/dependency/proof phases derived from resolved App Setup + Core Flows; never creates scope
 5. **Blueprint Intelligence** — severity-typed review signals, recommendation provenance, readiness, app-type fit, quick fixes, domain suggestions, acceptance criteria, and edge cases
 6. **Product Capabilities** — reusable product/engineering concepts reconciled against App Setup
-7. **Visual Patterns + Visual Studio** — expressive visual direction, design-token controls, and live previews reconciled against structured choices
-8. **Project Docs + References** — durable repository context and inspiration with Blob-backed reference assets
-9. **Implementation Brief** — clean Markdown, AI prompt, and structured JSON outputs from one resolved truth
+7. **Visual Director + Visual Studio** — one coherent project-specific Design DNA / Visual Thesis synthesized from context, with explicit Hard / Direction / Freedom authority and advanced raw controls underneath
+8. **Pattern Explorer 2.0 + Anti-Homogeneity** — Best Match / Good Fits, compatibility-filtered bundles, qualitative originality, repeated-trait diagnostics, and context-safe diversification across saved projects
+9. **Page Composition + Visual Quality Review** — domain-aware page hierarchy, responsive recomposition, anti-AI-slop diagnostics, and frontend visual acceptance criteria
+10. **Visual Preview Studio** — A/B/C live comparison, multi-page/device previews, high-value refinements, scope-safe warnings, and intentional persistence back to Visual DNA
+11. **Visual Approval + Approved Visual Contract** — explicit approval snapshot, deterministic stale/re-approval semantics, interaction proof states, and compiler authority integration
+12. **Project Docs + References** — durable repository context and inspiration with Blob-backed reference assets
+13. **Implementation Brief** — compiled scope authority plus synthesized visual direction, clean Markdown, AI prompt, and structured JSON outputs from one resolved truth
+
+
+## v0.28 — Pattern Explorer 2.0 + Anti-Homogeneity
+
+v0.28 is Phase 3 of the Visual Intelligence program. Pattern Explorer is now recommendation-first: Blueprint proposes a **Best Match**, two **Good Fits**, and an **Alternative** with fit rationale, drawback, qualitative originality, hard-constraint compatibility, and a small coherent pattern bundle. The full library remains available as an advanced learning/override surface.
+
+Key changes:
+
+- **Recommended for this project:** the Best Match is the v0.27 Visual Director synthesis rather than a disconnected preset.
+- **Explicit one-click application:** **Use Recommended Direction** applies the proposed visual DNA and adds only currently compatible bundled patterns. No functional scope is changed.
+- **Pattern compatibility engine:** App Setup incompatibilities remain blocking; visual conflicts such as Glassmorphism exclusion + Localized Glass Panel are surfaced deterministically; softer tensions appear as warnings.
+- **Coherent pattern bundles:** recommendations use small domain-appropriate bundles instead of encouraging unrelated pattern accumulation.
+- **Anti-Homogeneity engine:** saved projects are compared across typography, heading scale, grid/alignment, section rhythm, surface/card language, geometry, imagery, color behavior, motion, icon treatment, and pattern overlap.
+- **Useful diagnostics:** similarity is LOW / MODERATE / HIGH with repeated traits and context-safe diversification suggestions instead of a mystery score alone.
+- **Anti-randomness rule:** when a direction is already distinct, Blueprint explicitly recommends preserving contextual coherence rather than forcing novelty.
+- **Canonical differentiation stays intact:** ADW → Mechanical Editorial; Clinic → Clinical Calm; HRMS → Institutional Workforce; Booking → Courtline Booking; Sports → Competitive Signal; Portfolio → Authored Portfolio.
+- **Compiler/export integration:** Pattern Explorer intelligence now appears in implementation Markdown, the AI prompt, full Blueprint reference, Generated Spec, and JSON. Structured JSON is **schema v16** with a `patternExplorer` object.
+- **Regression coverage:** 13 dedicated v0.28 checks were added. Across all suites, **146 named regression checks pass**.
+
+Package/generated Blueprint metadata are `0.28.0`. Backup schema remains **v12** because Phase 3 intelligence is derived from existing persisted project/config/history state rather than requiring a new persisted project field.
+
+The release rule is: **recommend coherent directions first, expose compatibility honestly, diversify repeated visual structure without randomizing the product, and never let visual recommendations become functional scope authority.**
+
+
+## v0.27 — Visual Director Core
+
+v0.27 is Phase 2 of the Visual Intelligence program. It converts the existing direction/preset knowledge into a central **Visual Director** that produces one coherent project-level art direction before implementation, while preserving v0.25/v0.26 scope authority.
+
+Key changes:
+
+- **Design DNA synthesis:** Blueprint now outputs an archetype, visual tension, character, composition, geometry, typography, color behavior, imagery, motion, density, signature moment, and avoid-list as one coherent direction.
+- **Visual Thesis:** generated Markdown, AI prompt, full Blueprint reference, JSON, and the Spec screen now prioritize a synthesized project-level thesis before raw visual settings/patterns.
+- **Design Autonomy:** `Strict`, `Balanced · Recommended`, and `Art Director` determine how aggressively the proposed direction may resolve unspecified visual decisions. Applying a direction is still explicit.
+- **Visual Originality:** `Safe`, `Distinct · Recommended`, `Bold`, and `Experimental` control creative stretch while preserving the user’s usability priority.
+- **Signature design element:** `None`, `Subtle`, `Recommended`, and `Strong` produce a project-specific memorable motif such as ADW’s mechanical/product-spec ruler language, clinic timeline rhythm, institutional grid geometry, court lines, sports broadcast rails, or portfolio interaction/type behavior.
+- **Hard / Direction / Freedom authority:** hard constraints and explicit exclusions outrank Visual Director guidance; synthesized direction guides composition/system decisions; implementation freedom is reserved for minor responsive/micro-layout details where Blueprint is silent.
+- **Premium-quality semantics:** “premium” is now encoded as deliberate composition, typography, spacing, hierarchy, imagery, responsive behavior, and restraint—not black/beige, giant serifs, glass, huge whitespace, or generic luxury/card-grid clichés.
+- **Typography intelligence:** synthesized directions resolve heading/body/UI roles and recommended weights as a system, while explicit non-Auto weight choices survive synthesis unchanged.
+- **Media direction:** placeholder settings are combined with domain-specific imagery guidance and remain scope-safe. Visual synthesis cannot create product modules.
+- **Hard-constraint reconciliation:** Glassmorphism, gradient-heavy UI, excessive pills/rounding/animation exclusions are re-applied after synthesis so an art direction cannot silently contradict them.
+- **Canonical benchmark differentiation:** ADW → **Mechanical Editorial**; Clinic/EMR → **Clinical Calm**; Government HRMS → **Institutional Workforce**; Pickleball Booking → **Courtline Booking**; Tournament/Event → **Competitive Signal**; Portfolio → **Authored Portfolio**.
+- **Regression coverage:** the release adds 14 dedicated v0.27 checks. Across all suites, **133 named regression checks pass**.
+
+Structured JSON is now schema **v15** and package/generated Blueprint metadata are `0.27.0`. Backup schema remains **v12** because the new persisted visual controls normalize safely into the existing project DNA object.
+
+The release rule is: **synthesize one coherent visual direction, preserve hard constraints, and never let visual intelligence become functional scope authority.**
+
+## v0.26 — Intelligence Cleanup
+
+v0.26 is Phase 1 of the Visual Intelligence revamp. It keeps the v0.25 scope-authority architecture intact while making Blueprint much better at recognizing when human intent and selected structured scope do not line up.
+
+Key changes:
+
+- **Recommended setup incomplete:** ADW-style Project Context now produces a high-visibility important signal when a public business/marketing website is clearly intended but no corresponding public marketing scope is active. The app recommends review; it never silently activates the missing scope.
+- **Context-aware gap filling:** Strict / Balanced · Recommended / Proactive modes can infer only low-risk presentation, content, and implementation-detail decisions. Every decision carries `context_completion` provenance and is either `applied` or `held_for_scope`.
+- **Scope integrity remains absolute:** context completion has no authority path to checkout, accounts, payments, booking, inventory, CRM, admin dashboards, or other optional functional modules.
+- **Media Assistance:** placeholder-image generation, style, and coverage are structured App Setup decisions and compile into a scope-safe Media Direction.
+- **Audience-aware copy:** customer-facing copy guardrails prevent Blueprint/developer/meta language from leaking into public headings, buttons, navigation, empty states, footer copy, or placeholders.
+- **Typography weights:** Heading, Body, and UI/control weight preferences now support Auto / Recommended plus semantic choices; weight contrast is explicit, and exact numeric controls remain available in Advanced mode.
+- **Visual contradiction review:** deterministic conflicts such as Glassmorphism exclusion + Localized Glass Panel, competing typography patterns, and physical-retail context + Product Screenshots are surfaced before implementation.
+- **Export provenance:** context completion appears in the implementation Markdown, AI prompt, full Blueprint reference, and structured JSON. Structured JSON is now schema v14.
+- **Regression coverage:** `npm test` now runs **119 named checks**, including 10 dedicated v0.26 Intelligence Cleanup regressions.
+
+Backup schema remains **v12**; older workspaces normalize safely into the new visual-weight fields. Package/generated Blueprint metadata are `0.26.0`.
+
+The release rule is: **recognize incomplete intent, fill presentation gaps safely, and never turn intelligence into hidden product scope.**
+
+## v0.25 — Scope Authority + Prompt Compiler
+
+v0.25 closes a scope-authority bug where app-type recommendations could become active product scope. Optional functional capabilities now resolve through explicit **Off / Suggested / On / Required** states: app type, profile, Project Context, and general recommendations may suggest a capability, but only explicit user selection or a genuine hard dependency may activate it.
+
+Key changes:
+
+- **Suggested ≠ On:** recommended business packs are advisory and cannot silently enter implementation scope.
+- **Activation provenance:** active scope records whether authority came from explicit selection or a required dependency, with a final integrity diagnostic for invalid activation sources.
+- **Fail-closed dependency resolution:** circular/default fallback paths cannot activate scope, and explicitly disabled child behaviors no longer pull parent features into the product.
+- **Human-intent review:** HRMS-like Project Context can surface an important structured-scope mismatch without inventing HR modules.
+- **Roadmap/criteria containment:** inactive Government/document workflow no longer produces document-routing roadmap phases, acceptance criteria, or edge cases.
+- **Compiled implementation contract:** the primary AI/Markdown export now contains scope authority, material implementation decisions, baselines, proof, and a compact visual direction instead of serializing the entire Blueprint.
+- **Separate full reference:** the exhaustive resolved App Setup + Visual Studio state is downloadable as `*-blueprint-reference.md` for audit/debugging/targeted lookup.
+- **Regression coverage:** a dedicated v0.25 suite proves opt-in scope, hard dependencies, provenance, HRMS intent review, downstream non-resurrection, prompt compression, and preservation of explicit overrides.
+
+Backup schema remains **v12** because the persisted ProjectConfig shape is unchanged. Package/generated Blueprint metadata for this historical release were `0.25.0`.
 
 ## v0.24 — Reusable Product Architecture / Tenant Modularity
 
@@ -407,7 +525,7 @@ The full workspace travels with:
 - structured JSON
 - portable Blueprint backups
 
-Backup schema is **v12**. Imports remain compatible with v2–v12, and older project/config payloads normalize forward without inventing new scope.
+Backup schema is **v13**. Imports remain compatible with v2–v13, and older project/config/DNA payloads normalize forward without inventing new scope. v13 persists the new Visual DNA navigation variant used by Preview Studio.
 
 ## Existing systems preserved
 
@@ -450,9 +568,10 @@ npm run preview
 - `src/data/roadmap.ts` — derived implementation sequencing, including reusable-product phases
 - `src/data/persistence.ts` — IndexedDB workspace/recovery envelopes and Blob asset storage
 - `src/data/catalog.ts` — reusable visual pattern knowledge
+- `src/data/visualDirector.ts` — Visual Thesis / Design DNA synthesis, domain direction resolution, premium semantics, authority hierarchy, signature/media/typography direction
 - `src/data/capabilities.ts` — reusable generic software capability knowledge
 - `src/data/docs.ts` — project-document catalog and recommendation triggers
 - `src/components/PatternPreview.tsx` — visual schematic renderer
 - `src/styles.css` — responsive workspace/design-system UI
 
-Historical phase handoffs, release notes, and the completed expansion roadmap are archived under `docs/history/`. The current source-of-truth handoff is `V024_REUSABLE_PRODUCT_ARCHITECTURE_HANDOFF.md`.
+Historical phase handoffs, release notes, and the completed expansion roadmap are archived under `docs/history/`. The current source-of-truth handoff is `V027_VISUAL_DIRECTOR_CORE_HANDOFF.md`.

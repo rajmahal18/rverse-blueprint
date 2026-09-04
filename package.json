@@ -1,20 +1,27 @@
 {
   "name": "rverse-blueprint",
   "private": true,
-  "version": "0.24.0",
+  "version": "0.31.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "test": "npm run test:engine && npm run test:persistence && npm run test:review && npm run test:flows && npm run test:roadmap && npm run test:productization",
+    "test": "npm run test:engine && npm run test:persistence && npm run test:review && npm run test:flows && npm run test:roadmap && npm run test:productization && npm run test:scope-compiler && npm run test:v026 && npm run test:v027 && npm run test:v028 && npm run test:v029 && npm run test:v030 && npm run test:v031",
     "test:engine": "node scripts/engine-regression.mjs",
     "preview": "vite preview",
     "test:persistence": "node scripts/persistence-regression.mjs",
     "test:review": "node scripts/review-intelligence-regression.mjs",
     "test:flows": "node scripts/core-flows-regression.mjs",
     "test:roadmap": "node scripts/implementation-roadmap-regression.mjs",
-    "test:productization": "node scripts/reusable-product-regression.mjs"
+    "test:productization": "node scripts/reusable-product-regression.mjs",
+    "test:scope-compiler": "node scripts/scope-authority-prompt-compiler-regression.mjs",
+    "test:v026": "node scripts/visual-intelligence-phase1-regression.mjs",
+    "test:v027": "node scripts/visual-director-core-regression.mjs",
+    "test:v028": "node scripts/pattern-explorer-anti-homogeneity-regression.mjs",
+    "test:v029": "node scripts/page-composition-visual-quality-regression.mjs",
+    "test:v030": "node scripts/visual-preview-studio-regression.mjs",
+    "test:v031": "node scripts/visual-approval-contract-regression.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",

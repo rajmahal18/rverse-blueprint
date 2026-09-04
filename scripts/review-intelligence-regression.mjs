@@ -12,6 +12,7 @@ const hasLocalTsc = existsSync(localTsc)
 const compilerCommand = hasLocalTsc ? process.execPath : (process.platform === 'win32' ? 'tsc.cmd' : 'tsc')
 const compilerPrefix = hasLocalTsc ? [localTsc] : []
 
+
 rmSync(buildDir, { recursive: true, force: true })
 execFileSync(compilerCommand, [
   ...compilerPrefix,
@@ -60,6 +61,7 @@ check('all recommended app-type baselines remain free of typed App Setup signals
 
 check('admin without login is a security blocker linked to its quick fix', () => {
   let config = createProjectConfig('Internal / Operations')
+  config = setScopeChoice(config, 'admin.enabled', 'On')
   config = setScopeChoice(config, 'login.enabled', 'Off')
   const signal = configReviewSignals(config).find((item) => item.id === 'admin-without-login')
   assert.ok(signal)
@@ -81,6 +83,7 @@ check('booking conflict UI-only is a reliability blocker', () => {
 
 check('password-manager-hostile behavior is review-level usability rather than a blocker', () => {
   let config = createProjectConfig('SaaS / Client Portal')
+  config = setScopeChoice(config, 'login.enabled', 'On')
   config = setConfigValue(config, 'password.paste', false)
   const signal = configReviewSignals(config).find((item) => item.id === 'password-manager-hostile')
   assert.ok(signal)
@@ -99,6 +102,7 @@ check('typed severity counts are deterministic', () => {
 
 check('blockers reduce readiness more than review-only signals', () => {
   let reviewConfig = createProjectConfig('SaaS / Client Portal')
+  reviewConfig = setScopeChoice(reviewConfig, 'login.enabled', 'On')
   reviewConfig = setConfigValue(reviewConfig, 'password.paste', false)
   let blockerConfig = createProjectConfig('Booking / Scheduling')
   blockerConfig = setConfigValue(blockerConfig, 'booking.conflictPolicy', 'UI check only')
@@ -115,7 +119,7 @@ check('app-type recommendation provenance explains contextual defaults', () => {
 
 check('Auto operational-scale provenance identifies scale-driven defaults', () => {
   const config = createProjectConfig('Government System')
-  const provenance = settingRecommendationProvenance(setting('recovery.rpo'), config)
+  const provenance = settingRecommendationProvenance(setting('eng.deployStrategy'), config)
   assert.equal(provenance.source, 'Operational scale')
   assert.match(provenance.reason, /Mission critical/) 
   assert.match(provenance.reason, /Auto inference/)
@@ -137,12 +141,19 @@ check('explicit behavior overrides are labeled Explicit and remember the expecte
   assert.equal(provenance.current, 'UI check only')
 })
 
-check('scope provenance preserves Required/Inferred reasons rather than flattening them to Recommended', () => {
+check('scope provenance preserves Required reasons rather than flattening them to Recommended', () => {
   let config = createProjectConfig('Custom / General')
   config = setScopeChoice(config, 'pack.booking', 'On')
-  const admin = settingRecommendationProvenance(setting('admin.enabled'), config)
-  assert.ok(['Required', 'Inferred'].includes(admin.source), `Unexpected source: ${admin.source}`)
-  assert.ok(admin.reason.length > 10)
+  const records = settingRecommendationProvenance(setting('records.crud'), config)
+  assert.equal(records.source, 'Required')
+  assert.match(records.reason, /business pack|domain records|requires/i)
+})
+
+check('suggested scope provenance remains advisory', () => {
+  const config = createProjectConfig('Government System')
+  const government = settingRecommendationProvenance(setting('pack.government'), config)
+  assert.equal(government.source, 'Suggested')
+  assert.match(government.reason, /not included/i)
 })
 
 check('Project Context review signals are typed advisory scope signals', () => {
@@ -157,6 +168,21 @@ check('Project Context review signals are typed advisory scope signals', () => {
   assert.equal(signals[0].severity, 'advisory')
   assert.equal(signals[0].category, 'scope')
   assert.deepEqual(signals[0].affectedSettings, ['pack.booking'])
+})
+
+
+check('HRMS Project Context mismatch is important but cannot activate HR scope', () => {
+  const config = createProjectConfig('Government System')
+  const signals = projectContextReviewSignals({
+    building: 'BARMM ministries/agencies HRMS',
+    audience: 'BARMM employees',
+    outcomes: 'Reusable HRMS across ministries with employee records, leave, attendance, and payroll.',
+    priorities: 'Ease of use', nonNegotiables: '', avoid: '', dependencies: '', done: '',
+  }, config)
+  const signal = signals.find((item) => item.id === 'context-hrms-structured-scope-mismatch')
+  assert.ok(signal)
+  assert.equal(signal.severity, 'important')
+  assert.match(signal.detail, /Do not invent HR modules/)
 })
 
 rmSync(buildDir, { recursive: true, force: true })
